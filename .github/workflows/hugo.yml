@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
   pages: write
   id-token: write
 
@@ -39,8 +39,6 @@ jobs:
       - name: Setup Pages
         id: pages
         uses: actions/configure-pages@v5
-        with:
-          enablement: true   # auto-enables Pages if not yet turned on
 
       - name: Build with Hugo
         env:
@@ -49,7 +47,7 @@ jobs:
         run: |
           hugo \
             --minify \
-            --baseURL "${{ steps.pages.outputs.base_url }}/"
+            --baseURL "${{ steps.pages.outputs.base_url }}"
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
