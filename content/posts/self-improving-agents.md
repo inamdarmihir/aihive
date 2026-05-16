@@ -1,8 +1,8 @@
 -----
 
-## title: Architecting Self-Improving Agents
+## title: “Architecting Self-Improving Agents”
 date: 2026-05-16
-description: A proposed architecture for agents that learn from experience — episodic memory in Markdown, selective context reveal, MCP as wiring, and SME-driven evals that close the fine-tuning loop.
+description: “A proposed architecture for agents that learn from experience - episodic memory in Markdown, selective context reveal, MCP as wiring, and SME-driven evals that close the fine-tuning loop.”
 tags: [agents, fine-tuning, memory, mcp, lora, self-improvement]
 author: Mihir Inamdar
 showToc: true
