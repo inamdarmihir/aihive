@@ -2,7 +2,8 @@ baseURL: "https://inamdarmihir.github.io/aihive/"
 languageCode: en-us
 title: AI Hive
 theme: PaperMod
-paginate: 5
+pagination:
+  pagerSize: 5
 
 enableRobotsTXT: true
 buildDrafts: false
