@@ -1,4 +1,4 @@
------
+---
 
 ## title: “Context Windows Are a Cache Hierarchy”
 date: 2026-05-17
