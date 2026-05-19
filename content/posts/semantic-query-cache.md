@@ -1,12 +1,12 @@
------
-
-## title: “Semantic Query Caching with Qdrant: Web Search and SQL”
+---
+title: "Semantic Query Caching with Qdrant: Web Search and SQL"
 date: 2026-05-19
 description: “Why exact-match caches fail for AI-generated queries, and how a unified Qdrant-backed semantic cache with topic-aware TTL and table-dependency invalidation fixes both web search and SQL workloads.”
 tags: [“qdrant”, “vector-search”, “caching”, “sql”, “web-search”, “system-design”]
 author: “Mihir Inamdar”
 showToc: true
 math: true
+---
 
 Every AI agent that touches the outside world – searching the web, querying a database – pays the same tax on every run: the cost of re-fetching information it has already seen. The standard answer is a cache. The standard cache is an exact-match lookup on the query string. And for AI-generated queries, exact-match caching is almost entirely useless.
 
