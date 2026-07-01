@@ -1,6 +1,6 @@
 ---
 title: "Semantic Query Caching with Qdrant: Web Search and SQL"
-date: 2026-05-20
+date: 2026-06-10
 description: “Why exact-match caches fail for AI-generated queries, and how a unified Qdrant-backed semantic cache with topic-aware TTL and table-dependency invalidation fixes both web search and SQL workloads.”
 tags: [“qdrant”, “vector-search”, “caching”, “sql”, “web-search”, “system-design”]
 author: “Mihir Inamdar”
