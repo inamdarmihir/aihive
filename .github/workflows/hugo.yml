@@ -57,6 +57,36 @@ jobs:
     runs-on: ubuntu-latest
     needs: build
     steps:
-      - name: Deploy to GitHub Pages
-        id: deployment
+      # actions/deploy-pages can intermittently fail with "Deployment failed,
+      # try again later." due to transient GitHub Pages backend issues.
+      # Retry up to 3 times before giving up.
+      - name: Deploy to GitHub Pages (attempt 1)
+        id: deploy_attempt_1
+        continue-on-error: true
         uses: actions/deploy-pages@v4
+
+      - name: Deploy to GitHub Pages (attempt 2)
+        id: deploy_attempt_2
+        if: steps.deploy_attempt_1.outcome == 'failure'
+        continue-on-error: true
+        uses: actions/deploy-pages@v4
+
+      - name: Deploy to GitHub Pages (attempt 3)
+        id: deploy_attempt_3
+        if: steps.deploy_attempt_1.outcome == 'failure' && steps.deploy_attempt_2.outcome == 'failure'
+        uses: actions/deploy-pages@v4
+
+      - name: Set deployment result
+        id: deployment
+        if: always()
+        run: |
+          if [ "${{ steps.deploy_attempt_1.outcome }}" = "success" ]; then
+            echo "page_url=${{ steps.deploy_attempt_1.outputs.page_url }}" >> "$GITHUB_OUTPUT"
+          elif [ "${{ steps.deploy_attempt_2.outcome }}" = "success" ]; then
+            echo "page_url=${{ steps.deploy_attempt_2.outputs.page_url }}" >> "$GITHUB_OUTPUT"
+          elif [ "${{ steps.deploy_attempt_3.outcome }}" = "success" ]; then
+            echo "page_url=${{ steps.deploy_attempt_3.outputs.page_url }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "All deployment attempts failed" >&2
+            exit 1
+          fi
