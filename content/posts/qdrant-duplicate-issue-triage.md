@@ -1,6 +1,6 @@
 ---
 title: "Duplicate Issue Detection Without the Triage Tax: A Qdrant Hybrid Search Sidecar for GitHub"
-date: 2026-07-03
+date: 2026-06-27
 description: "How to build a GitHub webhook sidecar that uses Qdrant BM42 sparse-dense hybrid search and async scalar quantization to automatically surface duplicate issues before they ever reach the triage queue — with concrete collection design, scoring thresholds, and a FastAPI webhook handler."
 tags: ["qdrant", "vector-search", "bm42", "hybrid-search", "github", "deduplication", "system-design", "fastapi"]
 author: "Mihir Inamdar"
