@@ -1,6 +1,6 @@
 ---
 title: "Content-Addressed Subagent Result Caching in Deep Agents"
-date: 2026-07-28
+date: 2026-07-20
 description: "A content-addressed result cache for Deep Agents subagent dispatch, implemented as wrap_tool_call middleware on Qdrant — covering cache-key design, purity classification, invalidation, false-hit risk, and break-even cost analysis."
 tags: ["agents", "deepagents", "caching", "qdrant", "middleware", "cost-optimization"]
 author: "Mihir Inamdar"

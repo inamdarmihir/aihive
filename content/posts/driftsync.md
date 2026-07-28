@@ -1,6 +1,6 @@
 ---
 title: "Driftsync: Incremental Embedding Synchronization for Living Corpora"
-date: 2026-07-26
+date: 2026-07-15
 description: "A source-agnostic sync engine that re-embeds exactly what changed in a living corpus — handling content edits, moves, deletes, and embedding-pipeline drift — without nightly full rebuilds, using Qdrant as the reference vector store."
 tags: ["qdrant", "embeddings", "rag", "synchronization", "vector-search", "system-design"]
 author: "Mihir Inamdar"
