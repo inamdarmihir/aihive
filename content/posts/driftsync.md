@@ -634,6 +634,7 @@ def main(argv=None) -> int:
 ```
 
 Nightly: `15 3 * * * driftsync run -c /etc/driftsync.yaml`. CI uses `--source` for the changed repo. Prefer nightly full-source plus per-PR scoped sync: PR catches edits quickly; nightly backstops deletes and webhook-less sources.
+
 ## Evaluation / Worked Example
 
 I ran the engine against a mixed corpus: product Markdown in git ($42{,}000$ chunks), help-center sitemap ($18{,}000$), Confluence ($27{,}000$) — $87{,}000$ total, 1536-d `text-embedding-3-small`, Qdrant 1.9 single-node, payload-only manifest, batch size 64.
@@ -649,6 +650,7 @@ I ran the engine against a mixed corpus: product Markdown in git ($42{,}000$ chu
 With $c \approx 0.005$ on the quiet day, observed $3.1 / 48 \approx 0.065$; the gap versus $s/e + c$ is cold-sync indexing and the quiet-day full manifest scroll. At $10\times$ corpus size the ratio should improve toward $s/e + c$ as scroll moves to SQLite.
 
 One failure: the sitemap adapter renumbered `chunk_index` after boilerplate-stripping shortened page text, flipping thousands of chunks to DELETE+INSERT. The fix was content-offset buckets rather than dense indices — adapter stability is part of the sync contract.
+
 ## Challenges and Open Problems
 
 **Chunk boundary stability.** If the chunker's output shifts whenever nearby content changes, semantically identical chunks get new hashes and the diff loses its benefit. This is the problem **content-defined chunking** solved in the file-systems literature — Muthitacharoen et al.'s **LBFS** ([Muthitacharoen et al., 2001](https://dl.acm.org/doi/10.1145/502034.502052)) uses a rolling hash (Rabin fingerprints) so a mid-file edit only perturbs nearby chunks. An equivalent for text — headings, sentences, or Rabin cut points — is not yet implemented.
@@ -662,6 +664,7 @@ One failure: the sitemap adapter renumbered `chunk_index` after boilerplate-stri
 **Manifest / index divergence.** Operators can delete points or restore backups out of order. A periodic `driftsync doctor` that recomputes hashes from stored `text` (or re-fetches from adapters) would close this loop; it does not exist yet.
 
 **Multi-tenant isolation.** Every scroll/search must filter on `tenant_id`, and point IDs must incorporate the tenant — otherwise collisions overwrite another tenant's vectors. Easy to add to `make_point_id`, easy to forget in adapters.
+
 ## Citation
 
 ```bibtex

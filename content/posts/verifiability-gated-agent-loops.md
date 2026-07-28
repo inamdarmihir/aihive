@@ -11,6 +11,7 @@ math: true
 Coding agents can now run for hours without a human reading a line of what they produce. The natural next question is how far that can go before something breaks that nobody notices until much later. This post is not about prompting technique. It is about a structural gap in how agentic loops are built: most loops only know how to check the thing they were told to check, and nothing tells them when that check is not measuring what actually matters.
 
 I want to narrow the scope considerably. This post does not cover model training, RLHF, or benchmark design in depth — those appear only insofar as they explain *why* the gap exists. The focus is architectural and implementational: a five-component LangGraph supervisor with risk scoring, Harbor-style verifier contracts, escalation artifacts, checkpoint commits as blast-radius boundaries, and a calibration loop that mines labeled outcomes back into the classifier.
+
 ## Table of Contents
 
 1. [Background: the loop engineering moment](#background-the-loop-engineering-moment)
@@ -33,6 +34,7 @@ I want to narrow the scope considerably. This post does not cover model training
 11. [Related Directions](#related-directions)
 12. [Challenges and Open Problems](#challenges-and-open-problems)
 13. [References](#references)
+
 ## Background: the loop engineering moment
 
 In mid-2026 a phrase spread quickly through the agent-engineering community: stop prompting your coding agent, start designing the loop that prompts it for you. The idea itself predates the phrase — agents inside feedback loops with tools, retries, and stop conditions is not new — but the framing crystallized something practitioners had already converged on. A loop, in this sense, is a small system: a trigger, a verification step, some memory, and a stop condition, wrapped around a model.
@@ -42,6 +44,7 @@ Loops work extremely well on bounded, mechanically checkable work. Triage a fail
 The trouble starts once you point the same loop at something that does not reduce to pass/fail. Several practitioner reports through 2026 — most notably a widely discussed essay from the **HumanLayer** team on lights-off agent coding, alongside data from **Faros AI**'s code-review research — describe teams that went "lights-off" (no human reading agent-generated code before merge) and later found review quality, incident rates, and bugs-per-developer trending the wrong way. None of this is because the agents were failing their tests. It is because the tests were never checking the thing that eventually cost them time: whether the codebase stayed easy to change.
 
 I would consider that moment less a failure of agent capability and more a failure of loop engineering. The loops were honest about what they measured. They were silent about what they could not measure.
+
 ## The verifiability gap
 
 Call this the **verifiability gap**: the difference between what a loop's stop condition actually measures and what "success" means for the task. I find it useful to write that difference explicitly:

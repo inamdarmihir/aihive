@@ -88,6 +88,7 @@ Waypoint has three components: a `Workflow` engine, a `CheckpointStore` over Qdr
 ```
 
 A `RunHandle` is returned to the caller and can also be reconstructed via `Workflow.get_run(run_id)` with no re-execution.
+
 ## Component One: The Workflow Engine
 
 A `Workflow` is an ordered list of plain functions, each taking and returning a state dict — the same shape as a LangGraph node or Temporal activity, so it slots into existing pipelines rather than replacing them.

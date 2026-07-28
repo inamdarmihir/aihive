@@ -74,6 +74,7 @@ Not all incomplete responses look alike, and a validator that only checks for em
 **Type-conformant nonsense.** Values are individually plausible and jointly absurd — shipping date before order date, percentage above 100. MCP example — `orders.get_status`: `{"ordered_at": "2026-07-20T10:00:00Z", "shipped_at": "2026-07-18T09:00:00Z", "fulfillment_pct": 120}`. Every field type-checks; jointly they are absurd. Statistical baselines rarely catch this class — the constraint is logical, not distributional, and may never have been violated in historical traffic.
 
 The common thread is that all four are invisible to anything that validates only *shape* rather than *expectation*.
+
 ## Design Overview: Schema-Aware Response Validator
 
 The system sits as a thin interceptor between the MCP client and the agent's reasoning loop. It defines what a "normal" response looks like, intercepts the actual response before the agent sees it, scores that response against the expectation, and remembers enough history to improve scoring over time.
