@@ -178,6 +178,7 @@ def record(self, name: str, arguments: dict, result: ToolResult, verdict: Verdic
                 "tool": name,
                 "arg_shape": canonicalize(arguments),
                 "cardinality": extract_any_count(result),
+                "had_cursor": extract_any_cursor(result) is not None,
                 "timestamp": time.time(),
                 "anomaly_score": verdict.anomaly_score,
             },
