@@ -107,7 +107,8 @@ class ValidatingMCPClient:
         result = await self.inner.call_tool(name, arguments)
         schema = self.schemas.get(name)
         if schema is None:
-            return result  # no expectation yet — record and pass through
+            self.history.record(name, arguments, result, Verdict(anomaly_score=0.0, threshold=0.5, reason="no_schema"))
+            return result  # no expectation yet — record baseline and pass through
 
         verdict = score_response(result, schema, self.history, name, arguments)
         self.history.record(name, arguments, result, verdict)
