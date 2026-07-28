@@ -1,6 +1,6 @@
 ---
 title: "Durable Agent Workflows: Checkpointing and Semantic Failure Search with Qdrant"
-date: 2026-07-27
+date: 2026-07-17
 description: "How Waypoint uses Qdrant as both a checkpoint log and a semantic failure index to make agent and LLM pipelines durable and debuggable — covering resume semantics, time-travel diffs, and human-in-the-loop pauses."
 tags: ["agents", "qdrant", "checkpointing", "durable-execution", "debugging", "workflows"]
 author: "Mihir Inamdar"
