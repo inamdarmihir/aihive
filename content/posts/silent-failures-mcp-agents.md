@@ -135,6 +135,8 @@ def score_response(result, schema, history, name, arguments) -> Verdict:
         lo, hi = schema.cardinality_range
         if n < lo:
             checks.append(("cardinality", (lo - n) / max(lo, 1)))
+        elif n > hi:
+            checks.append(("cardinality", (n - hi) / max(hi, 1)))
 
     if schema.pagination_field:
         cursor = extract_field(result, schema.pagination_field)
