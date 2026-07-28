@@ -76,7 +76,7 @@ Comparing incoming $(\text{id}, h)$ pairs against the manifest yields:
 | no | — | — | genuinely new — embed and insert |
 | id in manifest, absent from incoming | — | — | deleted — remove |
 
-This table is the correct core of the idea: a fixed identity plus a content checksum classifies change without comparing the actual text. The pipeline-version column is the extension discussed next.
+This table is the core of the idea: identity plus checksum classifies change without comparing text. The pipeline-version column is next.
 
 ```python
 import hashlib, uuid
@@ -102,49 +102,40 @@ class ManifestRow:
 
 ## The Missing Dimension: Pipeline Drift
 
-Existing designs treat the corpus as the only thing that drifts and the pipeline as fixed forever. That assumption breaks the first time a team upgrades its embedding model or changes chunk size from 512 to 800 tokens. Both invalidate every existing vector even though the underlying text hasn't moved — and a pure content-hash diff classifies all of it as "unchanged" and silently skips it. The index becomes internally consistent and simultaneously wrong.
+Existing designs treat the corpus as the only thing that drifts. That breaks on the first embedding-model upgrade or chunk-size change from 512 to 800 tokens: every vector is invalid though the text hasn't moved, and a pure content-hash diff skips it all. The index is consistent and wrong.
 
-The fix is to widen the manifest row to include pipeline state:
+Widen the manifest to include pipeline state:
 
 $$
 \text{row} = (\text{id},\ h,\ v_{\text{embed}},\ v_{\text{chunk}},\ \text{location},\ \text{run\_id})
 $$
 
-A chunk counts as unchanged only when $h$, $v_{\text{embed}}$, and $v_{\text{chunk}}$ all match. Bumping either version tag turns a model or chunker upgrade into an ordinary sync event: every affected row is flagged for re-embedding, and the engine can stage that work — rate-limited, prioritized, resumable — instead of ignoring drift or triggering an uncontrolled full rebuild.
+Unchanged requires $h$, $v_{\text{embed}}$, and $v_{\text{chunk}}$ all match. Bumping either tag turns a model/chunker upgrade into a first-class, rate-limited sync event instead of a silent skip or uncontrolled rebuild.
 
-Version tags should be opaque strings that change whenever the *semantic* of the pipeline step changes. I use `text-embedding-3-small@1536` for the embedder and `markdown-heading-v2@512` for the chunker. The `@` suffix captures parameters that affect output: dimension, window size, overlap.
+Version tags change when pipeline *semantics* change. I use `text-embedding-3-small@1536` and `markdown-heading-v2@512` — the `@` suffix captures dimension, window, overlap.
 
 ```python
 @dataclass(frozen=True)
 class PipelineConfig:
-    embed_version: str   # e.g. "text-embedding-3-small@1536"
-    chunk_version: str   # e.g. "markdown-heading-v2@512"
-    embed_dim: int
-    model_name: str
-
+    embed_version: str; chunk_version: str; embed_dim: int; model_name: str
     def bump_embed(self, model_name: str, dim: int) -> "PipelineConfig":
-        return PipelineConfig(
-            embed_version=f"{model_name}@{dim}",
-            chunk_version=self.chunk_version,
-            embed_dim=dim,
-            model_name=model_name,
-        )
+        return PipelineConfig(f"{model_name}@{dim}", self.chunk_version, dim, model_name)
 ```
 
-This is a small schema change and, as far as I can tell, absent from public write-ups of this pattern. The operational consequence is large: pipeline upgrades become incremental jobs instead of weekend rebuilds.
+This is a small schema change absent from public write-ups. Pipeline upgrades become incremental jobs instead of weekend rebuilds.
 
 ## Diffing at Scale: A Merge-Join
 
-A point-existence check against the vector database for every incoming chunk is fine for a few thousand chunks. It stops being fine once round-trip latency dominates: at $n$ chunks and one network call per chunk, wall-clock time grows as $O(n \cdot d)$ where $d$ is per-call latency. At $d = 5\text{ms}$ and $n = 10^6$, that is roughly 1.4 hours spent waiting on the network before a single embedding call.
+A point-existence check per chunk is fine for thousands of chunks and fails once latency dominates: $O(n \cdot d)$ wall-clock. At $d = 5\text{ms}$, $n = 10^6$, that is ~1.4 hours of network waits before any embedding.
 
-The standard database answer is a **sort-merge join** ([Selinger et al., 1979](https://dl.acm.org/doi/10.1145/582095.582099)):
+The database answer is a **sort-merge join** ([Selinger et al., 1979](https://dl.acm.org/doi/10.1145/582095.582099)):
 
-1. Bulk-load the existing manifest for a given source, sorted by point ID (one scroll/filter, not $n$ lookups).
+1. Bulk-load the manifest for a source, sorted by point ID.
 2. Stream incoming chunks sorted the same way.
-3. Walk both sequences lock-step, classifying each row in $O(1)$.
-4. Batch inserts, updates, and deletes.
+3. Walk both lock-step, classifying each row in $O(1)$.
+4. Batch writes.
 
-This turns $O(n \cdot d)$ into $O(n \log n)$ sorting (or $O(n)$ if the source yields ID order) plus a constant number of bulk reads and batched writes. Memory is $O(n_{\text{source}})$ for one source's manifest slice — not the whole corpus.
+This turns $O(n \cdot d)$ into $O(n \log n)$ sorting (or $O(n)$ if already ID-ordered) plus bulk reads and batched writes. Memory is $O(n_{\text{source}})$ per source slice.
 
 ```python
 from enum import Enum, auto
@@ -177,11 +168,11 @@ def merge_join(
         yield SyncAction.DELETE, orphan_id, None
 ```
 
-In practice this is the difference between minutes and hours once a corpus crosses $10^5$–$10^6$ chunks. The algorithm also checkpoints cleanly: after each write batch, record the last processed `point_id`; on crash, resume the merge from that cursor.
+In practice this is minutes vs hours past $10^5$–$10^6$ chunks. Checkpoint after each write batch on the last `point_id`; resume from that cursor on crash.
 
 ## Detecting Moves and Duplicates
 
-The merge-join catches moves when the point ID changes — a file rename that alters `location`. Catching content that migrated across sources, or was copied verbatim into a second document, requires a corpus-wide map from content hash to point ID. Consult it whenever the merge-join produces "new chunk, no ID match." If the hash is already present, reuse the vector and update only the manifest row.
+The merge-join catches moves when the point ID changes (e.g. file rename). Cross-source copies need a corpus-wide `content_hash → point_id` map: on "new chunk, no ID match," reuse the vector if the hash exists.
 
 ```python
 def build_hash_index(client, collection: str) -> dict[str, str]:
