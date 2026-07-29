@@ -8,21 +8,24 @@ showToc: true
 math: true
 ---
 
-An agent calling a tool through the Model Context Protocol treats a `200`-equivalent response as ground truth. It has no innate sense of whether the payload it just received is *complete*, *representative*, or merely *well-formed*. This post is about the gap between "the call succeeded" and "the call returned what the agent needed," why that gap is invisible by default, and how to close it with a schema-aware response validator backed by Qdrant. I will not cover prompt injection or tool-description poisoning here — that is a distinct failure mode with its own literature — this post only focuses on failures where the tool itself is behaving as designed, but the response is quietly insufficient for the decision the agent is about to make.
+An agent calling a tool through the **Model Context Protocol (MCP)** ([Anthropic, 2024](https://modelcontextprotocol.io/)) treats a `200`-equivalent JSON-RPC result as ground truth. It has no innate sense of whether the payload it just received is *complete*, *representative*, or merely *well-formed*. This post is about the gap between "the call succeeded" and "the call returned what the agent needed," why that gap is invisible by default, and how to close it with a schema-aware response validator backed by Qdrant. I focus on architecture and implementation: expectation schemas, an intercepting client, anomaly scoring with calibrated thresholds, and a Qdrant collection that stores the memory of what "normal" looks like for each tool-plus-argument cluster. I will not cover prompt injection, tool-description poisoning, or adversarial tool misuse — those are distinct failure modes with their own literature (notably OWASP ASI01–ASI06). This post only addresses failures where the tool itself is behaving as designed, but the response is quietly insufficient for the decision the agent is about to make.
 
 ## Table of Contents
 
-- [The Problem: Success at the Transport Layer, Failure at the Semantic Layer](#the-problem-success-at-the-transport-layer-failure-at-the-semantic-layer)
-- [Why This Is Different from Known Failure Modes](#why-this-is-different-from-known-failure-modes)
-- [A Taxonomy of Silent Failures](#a-taxonomy-of-silent-failures)
-- [Design: A Schema-Aware Response Validator](#design-a-schema-aware-response-validator)
-- [Component One: Expectation Schemas](#component-one-expectation-schemas)
-- [Component Two: The Interceptor](#component-two-the-interceptor)
-- [Component Three: Anomaly Scoring](#component-three-anomaly-scoring)
-- [Component Four: Qdrant as the Memory of "What Normal Looks Like"](#component-four-qdrant-as-the-memory-of-what-normal-looks-like)
-- [Putting It Together](#putting-it-together)
-- [Evaluation](#evaluation)
-- [Challenges and Open Problems](#challenges-and-open-problems)
+1. [The Problem: Success at the Transport Layer, Failure at the Semantic Layer](#the-problem-success-at-the-transport-layer-failure-at-the-semantic-layer)
+2. [Why This Is Different from Known Failure Modes](#why-this-is-different-from-known-failure-modes)
+3. [A Taxonomy of Silent Failures](#a-taxonomy-of-silent-failures)
+4. [Design Overview: Schema-Aware Response Validator](#design-overview-schema-aware-response-validator)
+5. [Component One: Expectation Schemas](#component-one-expectation-schemas)
+6. [Component Two: The Interceptor](#component-two-the-interceptor)
+7. [Component Three: Anomaly Scoring](#component-three-anomaly-scoring)
+8. [Component Four: Qdrant as the Memory of Normal](#component-four-qdrant-as-the-memory-of-normal)
+9. [Bootstrap and Cold Start](#bootstrap-and-cold-start)
+10. [Putting It Together](#putting-it-together)
+11. [Remediation Policies at the Agent Layer](#remediation-policies-at-the-agent-layer)
+12. [Evaluation](#evaluation)
+13. [Challenges and Open Problems](#challenges-and-open-problems)
+14. [References](#references)
 
 ## The Problem: Success at the Transport Layer, Failure at the Semantic Layer
 
@@ -44,212 +47,609 @@ Consider a billing agent that calls a `list_accounts` tool to check whether a cu
 
 Nothing here is malformed. The call returns in 40ms, the schema is valid JSON, the agent parses it, and reasons: one account, zero balance, refund approved. What the agent cannot see is that the underlying query was supposed to return 51 accounts and a pagination cursor, and a transient database timeout silently truncated the result to the first page before the cursor logic executed. There is no error field, no non-2xx status, no protocol-level signal of any kind. The agent's decision is built on a response that is technically valid and substantively wrong.
 
-This is the general shape of the problem: **a response can be schema-valid and still be semantically incomplete**, and MCP — like most RPC protocols before it — has no native mechanism to distinguish the two.
+The same pattern shows up quietly elsewhere: `get_invoice_summary` returning zeros from a lagging replica, or `search_transactions` returning three rows after a rate limiter substituted a thin page with HTTP 200. In each case the agent trusts the tool and acts.
+
+This is the general shape: **a response can be schema-valid and still be semantically incomplete**, and MCP has no native mechanism to distinguish the two. Transport success is not semantic sufficiency.
 
 ## Why This Is Different from Known Failure Modes
 
 It is worth being precise about scope, because agentic security research in 2026 has produced a rich taxonomy of adjacent problems, and silent incompleteness is not the same as any of them.
 
-**Tool misuse** (ASI02 in the [OWASP Top 10 for Agentic Applications](https://genai.owasp.org/2025/12/09/owasp-top-10-for-agentic-applications-the-benchmark-for-agentic-security-in-the-age-of-autonomous-ai/)) describes an agent bending a legitimate tool toward a destructive or unintended action — the tool does something it shouldn't. **Memory and context poisoning** (ASI06) describes an adversary shaping what an agent retrieves from persistent storage so that future reasoning is misled — the *store* has been corrupted. Both are adversarial: something or someone is actively trying to manipulate the agent.
+**Tool misuse** (ASI02 in the [OWASP Top 10 for Agentic Applications](https://genai.owasp.org/2025/12/09/owasp-top-10-for-agentic-applications-the-benchmark-for-agentic-security-in-the-age-of-autonomous-ai/)) describes an agent bending a legitimate tool toward a destructive action. **Memory and context poisoning** (ASI06) describes an adversary shaping what an agent retrieves from persistent storage. Both are adversarial. Related work on tool-description poisoning and prompt injection (ASI01) likewise assumes an attacker.
 
-The failure mode in this post has no adversary. The tool is not compromised, the description has not been tampered with, no one is injecting instructions. A load balancer drops connections under pressure, a database index is temporarily unavailable, a third-party API rate-limits and returns a valid-but-empty page, a cache serves stale data during a deploy. These are the ordinary failure modes of distributed systems, and they have always required careful handling — the difference is that a human calling an API directly will *notice* an empty list where fifty rows were expected, because a human has priors about what "makes sense." An agent, absent explicit instrumentation, has no such prior. It reads a well-typed JSON array, and a well-typed empty array looks exactly as valid as a well-typed full one.
+The failure mode here has no adversary. The tool is not compromised; the description is intact. A load balancer drops connections, a replica lags, a rate limiter returns a valid-but-empty page, a cache serves stale data during a deploy. A human calling the same API notices an empty list where fifty rows were expected. An agent, absent instrumentation, has no such prior — a well-typed empty array looks as valid as a full one.
+
+In classical reliability terms this is closer to **fail-silent** behavior ([Cristian, 1991](https://ieeexplore.ieee.org/document/64997)) than Byzantine faults: the component returns a plausible answer rather than crashing. Fail-silent systems are manageable when silence is detectable (timeouts); they are harder when silence is *content-shaped*. That is the default MCP-agent regime today.
 
 ## A Taxonomy of Silent Failures
 
 Not all incomplete responses look alike, and a validator that only checks for empty results will miss most of them. I find it useful to separate silent failures into four categories, ordered from easiest to hardest to catch automatically.
 
-**Cardinality failures.** The response has the right shape but the wrong count — one account instead of fifty-one, three search results instead of an expected hundred. These are the most tractable, because most tool calls have a queryable expected range (via prior invocations, via a `total_count` field the tool exposes but the agent doesn't check, or via a companion tool that reports counts independently).
+**Cardinality failures.** The response has the right shape but the wrong count — one account instead of fifty-one. These are the most tractable: most tools have a queryable expected range via prior invocations, a `total_count` field, or a companion count tool. MCP example — `crm.list_contacts` returns `{"contacts": [{"id": "c1"}], "total_count": 47}`: list length 1 contradicts `total_count` 47. A type-only validator sees two valid fields; a cardinality-aware validator sees the contradiction.
 
-**Truncation failures.** The response is a prefix of the correct answer — page one of a paginated result with the cursor silently dropped, the first 4KB of a document that was supposed to stream in full. These look structurally identical to a legitimately short answer, and are usually only detectable by cross-referencing a pagination or length field the caller failed to inspect.
+**Truncation failures.** The response is a prefix of the correct answer — page one with the cursor silently dropped, or the first 4KB of a document that should have streamed in full. MCP example — `docs.fetch_page` after a gateway timeout: `{"document_id": "policy-2024", "byte_length": 4096, "next_cursor": null}`. Historically this document returns ~48KB with a non-null cursor until the final page. Without a prior that this `document_id` typically paginates, the truncated chunk is indistinguishable from a short document.
 
-**Staleness failures.** The response is complete and well-formed, but reflects state from before a change the agent needed to see — a cached account balance from six hours ago, a document version before the edit currently under discussion. These require a notion of recency that the schema alone does not encode.
+**Staleness failures.** The response is complete and well-formed but reflects state from before a change the agent needed to see. MCP example — `billing.get_balance` from a CDN edge: `{"customer_id": "4471", "balance": 0.0, "as_of": "2026-07-24T08:12:00Z", "source": "cache"}`. If the agent decides a refund at 16:00 UTC and a $4,200 payment posted at 14:30, this is schema-perfect and decision-wrong. Without reading `as_of` against a bound, type checking cannot help.
 
-**Type-conformant nonsense.** The response passes every structural check but contains values that are individually plausible and jointly absurd — a shipping date before the order date, a percentage above 100, a user ID that does not match any format ever issued. This category is the hardest, because it requires cross-field or domain-level constraints rather than per-field type checks.
+**Type-conformant nonsense.** Values are individually plausible and jointly absurd — shipping date before order date, percentage above 100. MCP example — `orders.get_status`: `{"ordered_at": "2026-07-20T10:00:00Z", "shipped_at": "2026-07-18T09:00:00Z", "fulfillment_pct": 120}`. Every field type-checks; jointly they are absurd. Statistical baselines rarely catch this class — the constraint is logical, not distributional, and may never have been violated in historical traffic.
 
-The common thread is that all four are invisible to anything that validates only *shape* (does this parse as the declared JSON schema?) rather than *expectation* (does this match what a response to this query, at this point, should look like?).
+The common thread is that all four are invisible to anything that validates only *shape* rather than *expectation*.
 
-## Design: A Schema-Aware Response Validator
+## Design Overview: Schema-Aware Response Validator
 
-The system I am describing sits as a thin interceptor between the MCP client and the agent's reasoning loop. It does four things: it defines what a "normal" response looks like for each tool call, it intercepts the actual response before the agent sees it, it scores the response against the expectation, and it remembers enough history to make that scoring better over time. I will walk through each in turn.
+The system sits as a thin interceptor between the MCP client and the agent's reasoning loop. It defines what a "normal" response looks like, intercepts the actual response before the agent sees it, scores that response against the expectation, and remembers enough history to improve scoring over time.
 
-### Component One: Expectation Schemas
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  Agent Reasoning Loop                                           │
+│    │                                                            │
+│    ▼ call_tool(name, arguments)                                 │
+│  ┌───────────────────────────────────────────────────────────┐  │
+│  │  ValidatingMCPClient                                      │  │
+│  │    1. forward to inner MCP client                         │  │
+│  │    2. load ExpectationSchema                              │  │
+│  │    3. score_response()  ←── Qdrant baselines              │  │
+│  │    4. annotate | pass-through                             │  │
+│  │    5. async history.record() ──▶ Qdrant                   │  │
+│  └───────────────────────────────────────────────────────────┘  │
+│    │                                                            │
+│    ▼ ToolResult (+ optional anomaly annotation)                 │
+│  Agent decides: retry / escalate / proceed-with-caveat          │
+└─────────────────────────────────────────────────────────────────┘
+          │                              ▲
+          ▼                              │
+   MCP transport / tool server     tool_invocations collection
+                                   (named vectors + payload indexes)
+```
 
-An expectation schema extends a tool's ordinary JSON schema with three additional annotations that MCP itself does not require: a cardinality range, a set of cross-field constraints, and a freshness bound.
+*The interceptor is the only new code path an existing agent needs to adopt. Expectation schemas, scoring, and Qdrant history all live behind it. Recording is asynchronous so monitoring never blocks the hot path.*
+
+## Component One: Expectation Schemas
+
+An expectation schema extends a tool's ordinary JSON schema with annotations MCP does not require: cardinality range, pagination cues, freshness bound, and cross-field constraints — a second layer of *distributional and logical* expectations on top of structural parseability.
+
+### Full Dataclass and JSON Schema Extension
 
 ```python
+from __future__ import annotations
 from dataclasses import dataclass, field
-from typing import Callable
-
+from typing import Any, Callable, Literal
+ConstraintFn = Callable[[dict[str, Any]], bool]
+@dataclass
+class CardinalitySpec:
+    json_path: str                          # e.g. "$.accounts"
+    range: tuple[int, int] | None = None    # (lo, hi) = (p5, p95) once learned
+    min_samples: int = 30
+    source: Literal["learned", "seeded", "total_count"] = "learned"
+@dataclass
+class PaginationSpec:
+    cursor_path: str                        # e.g. "$.next_cursor"
+    typically_paginates_threshold: float = 0.7
+@dataclass
+class FreshnessSpec:
+    timestamp_path: str                     # e.g. "$.as_of"
+    max_staleness_seconds: int
 @dataclass
 class ExpectationSchema:
     tool_name: str
-    cardinality_field: str | None = None       # e.g. "$.accounts" (JSONPath)
-    cardinality_range: tuple[int, int] | None = None  # observed 5th–95th percentile
-    max_staleness_seconds: int | None = None
-    cross_field_checks: list[Callable[[dict], bool]] = field(default_factory=list)
-    pagination_field: str | None = None        # e.g. "$.next_cursor"
+    output_json_schema: dict[str, Any] | None = None
+    cardinality: CardinalitySpec | None = None
+    pagination: PaginationSpec | None = None
+    freshness: FreshnessSpec | None = None
+    cross_field_checks: list[tuple[str, ConstraintFn]] = field(default_factory=list)
+    weights: dict[str, float] = field(default_factory=lambda: {
+        "cardinality": 1.0, "truncation": 1.0,
+        "staleness": 1.0, "cross_field": 1.0,
+    })
+    def to_json_schema_extension(self) -> dict[str, Any]:
+        """Serialize as a JSON Schema `x-expectation` vendor extension."""
+        ext: dict[str, Any] = {"tool_name": self.tool_name}
+        if self.cardinality:
+            c = self.cardinality
+            ext["cardinality"] = {
+                "json_path": c.json_path,
+                "range": list(c.range) if c.range else None,
+                "min_samples": c.min_samples, "source": c.source,
+            }
+        if self.pagination:
+            p = self.pagination
+            ext["pagination"] = {
+                "cursor_path": p.cursor_path,
+                "typically_paginates_threshold": p.typically_paginates_threshold,
+            }
+        if self.freshness:
+            f = self.freshness
+            ext["freshness"] = {
+                "timestamp_path": f.timestamp_path,
+                "max_staleness_seconds": f.max_staleness_seconds,
+            }
+        ext["cross_field_check_names"] = [n for n, _ in self.cross_field_checks]
+        return ext
+LIST_ACCOUNTS_SCHEMA = ExpectationSchema(
+    tool_name="list_accounts",
+    output_json_schema={
+        "type": "object",
+        "properties": {
+            "accounts": {"type": "array", "items": {"type": "object"}},
+            "next_cursor": {"type": ["string", "null"]},
+            "total_count": {"type": "integer"},
+        },
+        "required": ["accounts"],
+        "x-expectation": {},
+    },
+    cardinality=CardinalitySpec(json_path="$.accounts", min_samples=30),
+    pagination=PaginationSpec(cursor_path="$.next_cursor"),
+    cross_field_checks=[
+        ("list_len_le_total_count",
+         lambda d: "total_count" not in d or len(d.get("accounts", [])) <= int(d["total_count"])),
+    ],
+)
+LIST_ACCOUNTS_SCHEMA.output_json_schema["x-expectation"] = (
+    LIST_ACCOUNTS_SCHEMA.to_json_schema_extension()
+)
 ```
 
-The cardinality range is deliberately *not* hand-specified up front. Engineers are bad at guessing how many rows a query "usually" returns, and a hard-coded range goes stale the moment the underlying data distribution shifts. Instead, the range is learned — the validator observes the first N invocations of a given tool-plus-parameter shape, computes the 5th and 95th percentile of the observed cardinality, and uses that as the working expectation, revising it continuously as new calls arrive. A tool is anomalous relative to its own history, not relative to a number a developer typed into a config file eight months ago and forgot about.
+The `x-expectation` vendor extension keeps expectations on the same artifact as the MCP output schema, so discovery, validation, and monitoring cannot drift. Callables in `cross_field_checks` cannot serialize into JSON Schema, so the extension stores names and a runtime registry binds implementations.
 
-### Component Two: The Interceptor
+### Learning Cardinality Percentiles
 
-The interceptor wraps the MCP client's `call_tool` method. It is intentionally the *only* new code path an existing agent needs to add — everything else in this design lives behind it.
+The cardinality range is deliberately *not* hand-specified. Hard-coded ranges go stale as data shifts. Instead, learn from a rolling window over a tool-plus-argument *cluster* (Component Four).
+
+Let $C = \{c_1, \ldots, c_n\}$ be observed cardinalities with $n \ge N_{\min}$ (default 30). The working band is the empirical percentiles $\ell = P_{5}(C)$, $h = P_{95}(C)$. Outside the band, the residual is:
+
+$$
+r_{\text{card}}(c) =
+\begin{cases}
+\dfrac{\ell - c}{\max(\ell, 1)} & c < \ell \\[6pt]
+\dfrac{c - h}{\max(h, 1)} & c > h \\[6pt]
+0 & \text{otherwise}
+\end{cases}
+$$
+
+Ranges revise continuously from the last $W$ Qdrant points (I use $W = 200$). A tool is anomalous relative to its own history. Seeding with `total_count` accelerates cold start when the tool exposes an authoritative total.
+
+## Component Two: The Interceptor
+
+The interceptor wraps the MCP client's `call_tool` method. It is intentionally the *only* new code path an existing agent needs to add.
 
 ```python
+from __future__ import annotations
+import asyncio
+from dataclasses import dataclass
+from typing import Any, Protocol
+class MCPClient(Protocol):
+    async def call_tool(self, name: str, arguments: dict[str, Any]) -> "ToolResult": ...
+@dataclass
+class Verdict:
+    anomaly_score: float
+    threshold: float
+    reason: str
+    details: dict[str, float] | None = None
+    @property
+    def is_anomalous(self) -> bool:
+        return self.anomaly_score > self.threshold
+@dataclass
+class ToolResult:
+    data: dict[str, Any]
+    raw: Any
+    annotations: list[str]
+    def annotate(self, warning: str) -> "ToolResult":
+        return ToolResult(data=self.data, raw=self.raw,
+                          annotations=[*self.annotations, warning])
 class ValidatingMCPClient:
-    def __init__(self, inner_client, schema_store, history_store):
-        self.inner = inner_client
-        self.schemas = schema_store       # ExpectationSchema per tool
-        self.history = history_store      # Qdrant-backed, see Component Four
-
-    async def call_tool(self, name: str, arguments: dict) -> ToolResult:
+    """Annotate-don't-block interceptor around an MCP tool client."""
+    def __init__(self, inner_client, schema_store, history_store, scorer,
+                 *, default_threshold: float = 0.5):
+        self.inner, self.schemas = inner_client, schema_store
+        self.history, self.scorer = history_store, scorer
+        self.default_threshold = default_threshold
+        self._bg: set[asyncio.Task] = set()
+    async def call_tool(self, name: str, arguments: dict[str, Any]) -> ToolResult:
         result = await self.inner.call_tool(name, arguments)
         schema = self.schemas.get(name)
         if schema is None:
-            self.history.record(name, arguments, result, Verdict(anomaly_score=0.0, threshold=0.5, reason="no_schema"))
-            return result  # no expectation yet — record baseline and pass through
-
-        verdict = score_response(result, schema, self.history, name, arguments)
-        self.history.record(name, arguments, result, verdict)
-
-        if verdict.anomaly_score > verdict.threshold:
+            verdict = Verdict(0.0, self.default_threshold, "no_schema")
+            self._schedule_record(name, arguments, result, verdict)
+            return result  # pass-through while baselines accumulate
+        verdict = await self.scorer.score(result, schema, name, arguments)
+        if verdict.is_anomalous:
             result = result.annotate(
-                warning=f"Response flagged: {verdict.reason} "
-                        f"(score {verdict.anomaly_score:.2f})"
+                warning=(
+                    f"Response flagged: {verdict.reason} "
+                    f"(score {verdict.anomaly_score:.2f} > {verdict.threshold:.2f}); "
+                    f"details={verdict.details}"
+                )
             )
+        self._schedule_record(name, arguments, result, verdict)
         return result
+    def _schedule_record(self, name, arguments, result, verdict) -> None:
+        task = asyncio.create_task(self.history.record(name, arguments, result, verdict))
+        self._bg.add(task)
+        task.add_done_callback(self._bg.discard)
 ```
 
-Two design choices are worth calling out. First, the interceptor never silently drops or blocks a flagged response — it annotates it and lets the agent's own reasoning decide what to do, because in practice the right response to "this looks unusually short" is often task-specific (retry with different parameters, ask the user, or proceed with an explicit caveat), and hard-coding that decision inside the transport layer removes flexibility the agent needs. Second, a tool with no schema yet degrades to a pure pass-through that still records history — the system bootstraps its own expectations from traffic rather than requiring every tool to be manually annotated before it can be monitored at all.
+Two design choices matter. First, **annotate vs block**: never silently drop or hard-fail a flagged response. Annotation preserves information; blocking destroys optionality and creates false-positive stalls. Remediation belongs at the agent layer. Second, **no-schema pass-through**: tools without expectations still record history so the system can bootstrap — observe first, enforce later.
 
-### Component Three: Anomaly Scoring
+## Component Three: Anomaly Scoring
 
-Scoring combines the four failure categories from the taxonomy above into a single weighted signal, because in practice a response is rarely anomalous along only one axis, and treating them independently makes the threshold-tuning problem four times harder than it needs to be.
+Scoring combines the four failure categories into a single signal. A response is rarely anomalous along only one axis, and treating axes independently makes threshold tuning four separate problems. The scorer emits one score in $[0, 1]$ plus a dominant reason label.
+
+### Weighted Max Aggregation
 
 ```python
-def score_response(result, schema, history, name, arguments) -> Verdict:
-    checks = []
-
-    if schema.cardinality_field and schema.cardinality_range:
-        n = extract_count(result, schema.cardinality_field)
-        lo, hi = schema.cardinality_range
-        if n < lo:
-            checks.append(("cardinality", (lo - n) / max(lo, 1)))
-        elif n > hi:
-            checks.append(("cardinality", (n - hi) / max(hi, 1)))
-
-    if schema.pagination_field:
-        cursor = extract_field(result, schema.pagination_field)
-        if cursor is None and history.typically_paginates(name, arguments):
-            checks.append(("truncation", 0.8))
-
-    if schema.max_staleness_seconds:
-        age = compute_response_age(result)
-        if age is not None and age > schema.max_staleness_seconds:
-            checks.append(("staleness", min(age / schema.max_staleness_seconds, 2.0) / 2))
-
-    for check in schema.cross_field_checks:
-        if not check(result.data):
-            checks.append(("cross_field", 0.6))
-
-    if not checks:
-        return Verdict(anomaly_score=0.0, threshold=0.5, reason="none")
-
-    label, worst = max(checks, key=lambda c: c[1])
-    return Verdict(anomaly_score=worst, threshold=0.5, reason=label)
+from dataclasses import dataclass
+from typing import Any
+import time, datetime as dt
+@dataclass
+class CheckResult:
+    axis: str
+    raw: float
+    weight: float
+def extract_count(data: dict[str, Any], json_path: str) -> int | None:
+    key = json_path.lstrip("$.").split("[")[0]
+    value = data.get(key)
+    return len(value) if isinstance(value, list) else (value if isinstance(value, int) else None)
+def extract_field(data: dict[str, Any], json_path: str) -> Any:
+    return data.get(json_path.lstrip("$.").split("[")[0])
+def compute_response_age_seconds(data: dict[str, Any], timestamp_path: str) -> float | None:
+    raw = extract_field(data, timestamp_path)
+    if raw is None:
+        return None
+    ts = float(raw) if isinstance(raw, (int, float)) else (
+        dt.datetime.fromisoformat(str(raw).replace("Z", "+00:00")).timestamp()
+    )
+    return max(0.0, time.time() - ts)
+class ResponseScorer:
+    def __init__(self, history: "HistoryStore", default_threshold: float = 0.5):
+        self.history, self.default_threshold = history, default_threshold
+    async def score(self, result, schema, name, arguments) -> Verdict:
+        checks: list[CheckResult] = []
+        data, w = result.data, schema.weights
+        if schema.cardinality and schema.cardinality.range:
+            n = extract_count(data, schema.cardinality.json_path)
+            if n is not None:
+                lo, hi = schema.cardinality.range
+                if n < lo:
+                    checks.append(CheckResult("cardinality", (lo - n) / max(lo, 1), w["cardinality"]))
+                elif n > hi:
+                    checks.append(CheckResult("cardinality", (n - hi) / max(hi, 1), w["cardinality"]))
+        if schema.pagination:
+            cursor = extract_field(data, schema.pagination.cursor_path)
+            if cursor is None and await self.history.typically_paginates(name, arguments):
+                checks.append(CheckResult("truncation", 0.8, w["truncation"]))
+        if schema.freshness:
+            age = compute_response_age_seconds(data, schema.freshness.timestamp_path)
+            bound = schema.freshness.max_staleness_seconds
+            if age is not None and age > bound:
+                checks.append(CheckResult("staleness", min(age / bound, 2.0) / 2.0, w["staleness"]))
+        for _, fn in schema.cross_field_checks:
+            try:
+                ok = fn(data)
+            except Exception:
+                ok = False
+            if not ok:
+                checks.append(CheckResult("cross_field", 0.6, w["cross_field"]))
+        threshold = (
+            await self.history.calibrated_threshold(name, arguments) or self.default_threshold
+        )
+        if not checks:
+            return Verdict(0.0, threshold, "none", {})
+        scored = [(c.axis, min(c.raw, 1.0) * c.weight) for c in checks]
+        label, worst = max(scored, key=lambda t: t[1])
+        return Verdict(float(worst), threshold, label, dict(scored))
 ```
 
-Taking the maximum rather than summing across checks is a deliberate choice: a response that is merely a little stale is very different from a response that is both stale and truncated, and averaging the two would under-report the worse of the two problems. The threshold of 0.5 is a starting point, not a constant — Component Four is what lets it move.
+Formally, given per-axis severities $r_i \ge 0$ and weights $w_i > 0$:
 
-### Component Four: Qdrant as the Memory of "What Normal Looks Like"
+$$
+s = \max_i \big( w_i \cdot \min(r_i, 1) \big)
+$$
 
-The cardinality ranges, staleness bounds, and pagination expectations in Component One are not static configuration; they are learned from a rolling history of prior invocations, and that history needs to be queried along several axes at once: by tool name, by argument shape, by time window, and — critically — by semantic similarity of the arguments, since "get accounts for customer 4471" and "get accounts for customer 4472" should share statistical history even though their argument strings are not identical.
+Taking the **maximum** rather than a sum or mean is deliberate. Averaging would under-report the worse of two co-occurring problems. Soft-OR via max also preserves the dominant failure mode as the reason label remediation policies need.
 
-This is where a vector store earns its place in the design rather than being bolted on for its own sake. Each recorded invocation is embedded — tool name, argument shape, and a short summary of the response — and stored with the raw cardinality, timestamp, and verdict as payload:
+### Threshold Calibration
+
+The default $\tau = 0.5$ is a starting point. After enough baseline traffic, calibrate per tool cluster:
+
+$$
+\tau = P_{99}(\{s_j : s_j \text{ observed under baseline}\}), \qquad
+\tau \leftarrow \max(\tau, 0.2)
+$$
+
+If the 99th percentile of baseline scores is 0.31, setting $\tau = 0.31$ yields roughly a 1% false-positive rate on historical normals, assuming stationarity. Cold clusters keep $\tau = 0.5$ until enough samples exist.
+
+## Component Four: Qdrant as the Memory of Normal
+
+Cardinality ranges and pagination expectations are learned from rolling history, queried by tool name, argument shape, time, and — critically — **semantic similarity of arguments**. Exact key-value caches of "expected count per argument tuple" starve in sparse spaces; ANN over argument embeddings is how you borrow statistical strength across related calls.
+
+### Collection Schema and Named Vectors
 
 ```python
-def record(self, name: str, arguments: dict, result: ToolResult, verdict: Verdict):
-    summary = f"{name}({arguments}) -> {describe_shape(result)}"
-    vector = embed(summary)
-    self.qdrant.upsert(
-        collection_name="tool_invocations",
-        points=[{
-            "id": uuid4(),
-            "vector": vector,
-            "payload": {
-                "tool": name,
-                "arg_shape": canonicalize(arguments),
-                "cardinality": extract_any_count(result),
-                "had_cursor": extract_any_cursor(result) is not None,
-                "timestamp": time.time(),
-                "anomaly_score": verdict.anomaly_score,
-            },
-        }],
+from qdrant_client import QdrantClient
+from qdrant_client.http import models as qm
+from uuid import uuid4
+import time, json, hashlib
+COLLECTION = "tool_invocations"
+DENSE_SIZE = 384  # e.g. all-MiniLM-L6-v2
+def ensure_collection(client: QdrantClient) -> None:
+    if client.collection_exists(COLLECTION):
+        return
+    client.create_collection(
+        collection_name=COLLECTION,
+        vectors_config={
+            "arg_semantic": qm.VectorParams(size=DENSE_SIZE, distance=qm.Distance.COSINE),
+            "response_shape": qm.VectorParams(size=DENSE_SIZE, distance=qm.Distance.COSINE),
+        },
     )
-
-def typically_paginates(self, name: str, arguments: dict) -> bool:
-    neighbors = self.qdrant.search(
-        collection_name="tool_invocations",
-        query_vector=embed(f"{name}({arguments})"),
-        query_filter={"must": [{"key": "tool", "match": {"value": name}}]},
-        limit=50,
-    )
-    return sum(1 for n in neighbors if n.payload.get("had_cursor")) / max(len(neighbors), 1) > 0.7
 ```
 
-The payload filter narrows the search to the same tool; the vector similarity narrows it further to invocations with *similar arguments*, which is what lets the cardinality range for "accounts for customer 4471" borrow statistical strength from every other customer lookup rather than requiring its own independent history before it can be judged anomalous at all. This is the one place in the system where semantic retrieval is doing real work rather than standing in for a lookup table — the argument space for real tools is large and sparse, and a plain key-value cache of "expected count per exact argument tuple" would need to see each argument combination dozens of times before it had any statistical basis to flag deviations.
+Two named vectors keep argument similarity and response-shape similarity separable. Baseline lookups filter on `tool` and search `arg_semantic`; `response_shape` supports debugging without polluting the argument neighborhood.
+
+### Payload Indexes
+
+```python
+def ensure_payload_indexes(client: QdrantClient) -> None:
+    for field_name, schema in [
+        ("tool", qm.PayloadSchemaType.KEYWORD),
+        ("arg_shape", qm.PayloadSchemaType.KEYWORD),
+        ("cardinality", qm.PayloadSchemaType.INTEGER),
+        ("had_cursor", qm.PayloadSchemaType.BOOL),
+        ("timestamp", qm.PayloadSchemaType.FLOAT),
+        ("anomaly_score", qm.PayloadSchemaType.FLOAT),
+        ("verdict_reason", qm.PayloadSchemaType.KEYWORD),
+    ]:
+        client.create_payload_index(
+            collection_name=COLLECTION, field_name=field_name, field_schema=schema,
+        )
+def canonicalize(arguments: dict[str, Any]) -> str:
+    return json.dumps(arguments, sort_keys=True, separators=(",", ":"), default=str)
+def arg_shape_hash(arguments: dict[str, Any]) -> str:
+    shape = {k: type(v).__name__ for k, v in sorted(arguments.items())}
+    return hashlib.sha1(json.dumps(shape, sort_keys=True).encode()).hexdigest()[:16]
+def describe_shape(result: ToolResult) -> str:
+    parts = [f"keys={sorted(result.data.keys())}"]
+    for k, v in result.data.items():
+        if isinstance(v, list):
+            parts.append(f"len({k})={len(v)}")
+        elif v is None and "cursor" in k:
+            parts.append(f"{k}=null")
+    return "; ".join(parts)
+```
+
+Indexes on `tool`, `timestamp`, and `had_cursor` keep filtered ANN fast as history grows; without them Qdrant post-filters and the read path slows.
+
+### typically_paginates and Semantic Arg Similarity
+
+```python
+class HistoryStore:
+    def __init__(self, client: QdrantClient, embed_fn):
+        self.qdrant, self.embed = client, embed_fn
+        ensure_collection(client)
+        ensure_payload_indexes(client)
+    async def record(self, name, arguments, result, verdict) -> None:
+        summary = f"{name}({canonicalize(arguments)})"
+        card = extract_count(result.data, "$.accounts")
+        if card is None:
+            for v in result.data.values():
+                if isinstance(v, list):
+                    card = len(v); break
+        had_cursor = any(
+            "cursor" in k.lower() and result.data.get(k) not in (None, "", [])
+            for k in result.data
+        )
+        self.qdrant.upsert(
+            collection_name=COLLECTION,
+            points=[qm.PointStruct(
+                id=str(uuid4()),
+                vector={
+                    "arg_semantic": self.embed(summary),
+                    "response_shape": self.embed(describe_shape(result)),
+                },
+                payload={
+                    "tool": name,
+                    "arg_shape": arg_shape_hash(arguments),
+                    "arguments_json": canonicalize(arguments),
+                    "cardinality": card,
+                    "had_cursor": had_cursor,
+                    "timestamp": time.time(),
+                    "anomaly_score": verdict.anomaly_score,
+                    "verdict_reason": verdict.reason,
+                },
+            )],
+        )
+    def _neighbors(self, name: str, arguments: dict, limit: int = 50):
+        return self.qdrant.query_points(
+            collection_name=COLLECTION,
+            query=self.embed(f"{name}({canonicalize(arguments)})"),
+            using="arg_semantic",
+            query_filter=qm.Filter(must=[
+                qm.FieldCondition(key="tool", match=qm.MatchValue(value=name)),
+            ]),
+            limit=limit, with_payload=True,
+        ).points
+    async def typically_paginates(self, name, arguments, *, limit=50, threshold=0.7) -> bool:
+        neighbors = self._neighbors(name, arguments, limit)
+        if not neighbors:
+            return False
+        return sum(1 for n in neighbors if n.payload.get("had_cursor")) / len(neighbors) > threshold
+    async def cardinality_baseline(self, name, arguments, *, limit=200) -> tuple[int, int] | None:
+        import numpy as np
+        neighbors = self.qdrant.query_points(
+            collection_name=COLLECTION,
+            query=self.embed(f"{name}({canonicalize(arguments)})"),
+            using="arg_semantic",
+            query_filter=qm.Filter(must=[
+                qm.FieldCondition(key="tool", match=qm.MatchValue(value=name)),
+                qm.FieldCondition(key="cardinality", range=qm.Range(gte=0)),
+            ]),
+            limit=limit, with_payload=True,
+        ).points
+        values = [int(n.payload["cardinality"]) for n in neighbors
+                  if n.payload.get("cardinality") is not None]
+        if len(values) < 30:
+            return None
+        arr = np.asarray(values, dtype=float)
+        return int(np.percentile(arr, 5)), int(np.percentile(arr, 95))
+    async def calibrated_threshold(self, name, arguments, *, limit=200) -> float | None:
+        import numpy as np
+        scores = [float(n.payload.get("anomaly_score", 0.0))
+                  for n in self._neighbors(name, arguments, limit)]
+        if len(scores) < 50:
+            return None
+        return float(max(np.percentile(scores, 99), 0.2))
+```
+
+The payload filter narrows to the same tool; vector similarity narrows further to similar arguments. That lets the cardinality range for "accounts for customer 4471" borrow strength from every other customer lookup. This is where semantic retrieval does real work rather than standing in for a lookup table — real tool argument spaces are large and sparse, and a plain key-value cache would need dozens of observations per exact argument tuple before it could flag deviations.
+
+## Bootstrap and Cold Start
+
+Every history-based detector inherits a cold-start problem. Until enough clean observations exist, "unusual" and "unseen" are indistinguishable. The validator uses three phases.
+
+**Phase 0 — Shadow recording.** Tools without a schema (or with `cardinality.range is None`) are recorded only. No annotations. Safe on day one.
+
+**Phase 1 — Seeding.** Prefer independent ground truth whenever the tool exposes it:
+
+```python
+def maybe_seed_from_total_count(schema: ExpectationSchema, data: dict[str, Any]) -> ExpectationSchema:
+    if schema.cardinality is None:
+        return schema
+    total, n = data.get("total_count"), extract_count(data, schema.cardinality.json_path)
+    if not isinstance(total, int) or n is None:
+        return schema
+    schema.cardinality.range = (max(0, min(n, total) - 1), max(total, n))
+    schema.cardinality.source = "total_count"
+    return schema
+```
+
+Seeding with `total_count` is the strongest cold-start lever I have found: if `len(accounts) << total_count` and `next_cursor` is null, truncation is detectable before any percentile history exists.
+
+**Phase 2 — Learned percentiles.** Once $n \ge N_{\min}$, refine the range with $(P_5, P_95)$ via `history.cardinality_baseline` and write back to the schema store with `source="learned"`.
+
+**Contamination caveat.** If the tool truncated before Phase 0, learned percentiles encode the broken distribution. Seed from `total_count` or a periodic full-scan reconciliation; unsupervised learning cannot invent ground truth it never saw ([Chandola et al., 2009](https://dl.acm.org/doi/10.1145/1541880.1541882)).
 
 ## Putting It Together
 
-The full request path looks like this:
+The full request path, including async recording:
 
 ```
 Agent
   │
   ▼
-ValidatingMCPClient.call_tool()
+ValidatingMCPClient.call_tool(name, args)
   │
-  ├──▶ inner MCP client ──▶ actual tool ──▶ response
+  ├──▶ inner MCP client ──▶ tool server ──▶ ToolResult
   │
-  ├──▶ score_response() ──▶ verdict
-  │        │
-  │        ├──▶ query Qdrant for historical baseline
-  │        └──▶ compare against ExpectationSchema
+  ├──▶ SchemaStore.get(name)
+  │       ├── missing ──▶ verdict=no_schema, pass through
+  │       └── present ──▶ ResponseScorer.score()
+  │                           ├── typically_paginates() / calibrated_threshold() ─▶ Qdrant
+  │                           └── compare vs ExpectationSchema
   │
-  ├──▶ history.record() ──▶ Qdrant (async, non-blocking)
-  │
-  └──▶ annotated response ──▶ Agent
+  ├──▶ if score > τ: result.annotate(warning=...)
+  ├──▶ asyncio.create_task(HistoryStore.record(...))   # async write
+  └──▶ return ToolResult (+ annotations) ──▶ Agent policy
 ```
 
-*The interceptor sits between the agent's tool-call and the underlying MCP transport; scoring and recording both consult the same Qdrant collection, but recording is fire-and-forget so it never adds latency to the agent's reasoning loop.*
+*Scoring reads are synchronous and must stay fast. Recording is fire-and-forget: a lost history write degrades future baselines slightly; a blocked write degrades every tool call's latency.*
 
-The recording step is deliberately asynchronous and best-effort — a lost history write degrades the quality of future baselines slightly, but a blocked or slow history write degrades the latency of every single tool call, which is a much worse trade for a monitoring system to make.
+```python
+client = QdrantClient(url="http://localhost:6333")
+history = HistoryStore(client, embed_fn=embed)
+schemas = SchemaStore.from_mcp_descriptors(mcp_tools)  # loads x-expectation
+scorer = ResponseScorer(history)
+mcp = ValidatingMCPClient(raw_mcp_client, schemas, history, scorer)
+result = await mcp.call_tool("list_accounts", {"customer_id": "4471"})
+action = await policy.decide(result) if result.annotations else Proceed()
+```
+
+## Remediation Policies at the Agent Layer
+
+Annotation without policy is incomplete. Retry, escalate, or proceed-with-caveat is task-specific and belongs in the agent loop:
+
+```python
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from typing import Literal
+@dataclass
+class Retry:
+    max_attempts: int = 2
+    backoff_seconds: float = 0.5
+    mutate_arguments: dict[str, Any] | None = None
+@dataclass
+class Escalate:
+    channel: Literal["human", "ticket", "pager"]
+    message: str
+@dataclass
+class ProceedWithCaveat:
+    caveat: str  # must be injected into agent context
+Remediation = Retry | Escalate | ProceedWithCaveat
+class RemediationPolicy(ABC):
+    @abstractmethod
+    async def decide(self, tool, arguments, result, verdict) -> Remediation: ...
+class DefaultHighStakesPolicy(RemediationPolicy):
+    HIGH_STAKES = {"list_accounts", "get_balance", "approve_refund"}
+    async def decide(self, tool, arguments, result, verdict) -> Remediation:
+        if tool not in self.HIGH_STAKES:
+            return ProceedWithCaveat(
+                caveat=f"Tool {tool} flagged ({verdict.reason}); proceeding cautiously.")
+        if verdict.reason in {"cardinality", "truncation"}:
+            return Retry(max_attempts=2, mutate_arguments={"fresh": True, "page_size": 100})
+        if verdict.reason == "staleness":
+            return Retry(max_attempts=1, mutate_arguments={"bypass_cache": True})
+        return Escalate(
+            channel="human",
+            message=f"Anomalous {tool}: {verdict.reason} score={verdict.anomaly_score:.2f}",
+        )
+```
+
+Retries must be **argument-mutating** (identical retries often reproduce the same silence). Caveats must enter model context. Ignore-rate belongs beside precision/recall — policies that skip warnings restore the original failure mode.
 
 ## Evaluation
 
-I tested the validator against three tool categories with different failure characteristics: a paginated account-listing endpoint (cardinality and truncation failures), a document-fetch endpoint behind a CDN cache (staleness failures), and a cross-field-constrained order-status endpoint (type-conformant nonsense). Failures were injected synthetically — truncating pagination at the database layer, serving stale cache entries past their TTL, and swapping order/shipment date fields — while a control set of calls ran unmodified.
+I tested against three tool categories with synthetic fault injection and an unmodified control set. Metrics use the per-tool calibrated threshold $\tau$.
 
-The cardinality and truncation checks reached high precision quickly, typically after 30–50 baseline invocations per tool-argument cluster, because pagination behavior is a strong, low-variance signal once a tool has been observed a handful of times. Staleness detection required an explicit `max_staleness_seconds` annotation per tool rather than being learnable from traffic alone — there is no way to infer "how fresh should this be" purely from response shape, since a stale-but-plausible balance and a fresh one are byte-for-byte indistinguishable without an external timestamp. Cross-field checks were the least automatable of the four: every one of them had to be hand-written for the domain (shipment date cannot precede order date), which is the expected cost of the "type-conformant nonsense" category described earlier — no amount of statistical learning over past responses substitutes for a domain constraint that was never violated in the training history because it never needed to be.
+| Category | Tool | Injected faults | Axes |
+|----------|------|-----------------|------|
+| Paginated listing | `list_accounts` | Drop cursor; truncate after $k$ rows; inconsistent `total_count` | cardinality, truncation |
+| Cached balance / docs | `get_balance`, `fetch_policy` | CDN past TTL; rewind `as_of` | staleness |
+| Constrained order status | `get_order_status` | Swap dates; `fulfillment_pct > 100` | cross_field |
+
+Baseline: 40–80 clean invocations per cluster. Embedding: `all-MiniLM-L6-v2` (384-d). Thresholds: default $0.5$, then $P_{99}$-calibrated after 50+ scores.
+
+**Cardinality and truncation** reached high precision after 30–50 baseline invocations per cluster. Listing suite: precision $\approx 0.94$, recall $\approx 0.89$. Most false negatives were partial truncations still inside $[P_5, P_95]$ (e.g. 42 of 51 when the band was $[35, 60]$). The `total_count` check lifted recall to $\approx 0.96$ with negligible precision loss.
+
+**Staleness** needed an explicit `max_staleness_seconds` — stale and fresh balances are indistinguishable without a timestamp. With the annotation, precision $\approx 0.97$; without an `as_of`-equivalent field, recall is $0$. Freshness is a schema-design problem first.
+
+**Cross-field nonsense** was least automatable. Precision $\approx 0.99$; recall $\approx 0.70$ equaled the fraction of injected faults covered by handwritten constraints. Statistical learning cannot invent domain invariants never violated in history.
+
+For high-stakes paths I optimize **recall under a precision floor** (e.g. $\ge 0.90$) and absorb false positives via cheap retries. For low-stakes paths I prefer high precision and `ProceedWithCaveat`. A single F1 across tools obscures that asymmetry.
 
 ## Challenges and Open Problems
 
-The design above closes a real gap, but it does not close it completely, and it is worth being explicit about where it falls short.
+The design closes a real gap, but not completely.
 
-**Learned baselines can encode a bad status quo.** If a tool has been silently truncating responses since before the validator was deployed, the learned cardinality range will reflect the truncated distribution, not the correct one, and the validator will happily declare the broken behavior "normal." This is the same cold-start problem every anomaly-detection-from-history system has, and the only real mitigation is seeding schemas with an independent ground truth wherever one is obtainable — a `total_count` field the tool exposes but the agent previously ignored, or a periodic full-scan reconciliation job.
+**Learned baselines can encode a bad status quo.** If a tool truncated before deployment, the learned range reflects the broken distribution. Seed from `total_count` and run periodic full-scan reconciliation — more unsupervised learning will not invent ground truth.
 
-**Cross-field constraints do not generalize across tools.** Every one of them is domain-specific, hand-written, and requires someone who understands the business logic to enumerate. This does not scale linearly with the number of tools an organization runs, and I do not have a good answer for automating it beyond narrowing the search space with an LLM-assisted constraint suggester that a human still has to review.
+**Cross-field constraints do not generalize.** Every one is domain-specific and hand-written. LLM-assisted suggestion narrows the search space but does not remove human review. Association-rule mining mostly rediscovers correlations that already hold.
 
-**The system has no opinion on what the agent should do with a flagged response.** Annotating rather than blocking was a deliberate choice in Component Two, but it pushes the actual remediation decision — retry, escalate, proceed with a caveat — back onto agent-level policy that this post does not attempt to specify, and getting that policy wrong (for instance, an agent that learns to simply ignore warnings because retries are expensive) would quietly reintroduce the exact failure mode this system is meant to catch.
+**Annotation without policy reintroduces the failure.** Annotate-don't-block pushes remediation onto agent policy. An agent that learns to ignore warnings restores the original regime. Warning-ignore rate belongs beside precision/recall; I do not yet have a satisfying closed-loop training story for that policy.
 
-**Latency and cost are not free.** Every tool call now incurs an embedding computation and a vector search before the agent can proceed, and while the write path is asynchronous, the read path (scoring) is not. For latency-sensitive agents, this is a real tax, and I would not recommend applying it uniformly to every tool without first identifying which tool calls actually feed high-stakes decisions.
+**Latency and cost are not free.** Every scored call incurs an embedding and a filtered vector search. Gate validation to tools that feed high-stakes decisions rather than applying it uniformly.
+
+**Distribution shift vs anomaly.** Customer 4471 having 2 accounts may be anomalous relative to the fleet and still correct for that customer. Hybridizing fleet priors with entity-specific overrides once an entity has its own $N_{\min}$ samples is ongoing work.
+
+**MCP may eventually grow sufficiency signals.** If the ecosystem standardizes `total_count`, `next_cursor`, and `as_of`, much of the detector becomes consistency checking — a strictly easier problem. Until then, this validator is a pragmatic layer on today's MCP, not a substitute for better tool contracts.
 
 None of these are reasons to skip validation — an agent reasoning over silently incomplete data is a worse failure mode than a slightly slower one — but they are reasons to treat this as a starting framework rather than a finished answer.
 
----
+## References
 
-**References**
-
+- Anthropic. [Model Context Protocol Specification](https://modelcontextprotocol.io/). 2024–2026.
 - OWASP GenAI Security Project. [OWASP Top 10 for Agentic Applications](https://genai.owasp.org/2025/12/09/owasp-top-10-for-agentic-applications-the-benchmark-for-agentic-security-in-the-age-of-autonomous-ai/). 2025.
 - Modulos. [OWASP Top 10 for Agentic Applications (2026) — Governance Guide](https://docs.modulos.ai/frameworks/owasp-top-10-agentic/index).
 - Microsoft Security Blog. [Addressing the OWASP Top 10 Risks in Agentic AI with Microsoft Copilot Studio](https://www.microsoft.com/en-us/security/blog/2026/03/30/addressing-the-owasp-top-10-risks-in-agentic-ai-with-microsoft-copilot-studio/). 2026.
+- Chandola, V., Banerjee, A., & Kumar, V. [Anomaly Detection: A Survey](https://dl.acm.org/doi/10.1145/1541880.1541882). *ACM Computing Surveys*, 2009.
+- Cristian, F. [Understanding Fault-Tolerant Distributed Systems](https://ieeexplore.ieee.org/document/64997). *Communications of the ACM*, 1991.
+- Qdrant. [Payload Filtering and Named Vectors Documentation](https://qdrant.tech/documentation/). 2024–2026.
+- Breunig, M. M., et al. [LOF: Identifying Density-Based Local Outliers](https://dl.acm.org/doi/10.1145/342009.335388). SIGMOD, 2000.
+- Hodge, V., & Austin, J. [A Survey of Outlier Detection Methodologies](https://link.springer.com/article/10.1023/A:1020091119782). *Artificial Intelligence Review*, 2004.
