@@ -149,7 +149,7 @@ Understanding this type hierarchy is essential for prompt engineering. The LLM m
 
 ### Composing Nested Filters
 
-A realistic production filter often combines multiple condition types. The query *"white T-shirts priced under $15.70, within 30 miles of London, not made from polyester"* translates to:
+A realistic production filter often combines multiple condition types. The query *"white T-shirts priced under \$15.70, within 30 miles of London, not made from polyester"* translates to:
 
 ```python
 Filter(

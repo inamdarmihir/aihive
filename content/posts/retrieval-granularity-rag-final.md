@@ -217,7 +217,7 @@ Passage: {passage_text}
 
 **PropRAG** ([Wang & Han 2025](https://aclanthology.org/2025.emnlp-main.317)) demonstrates that propositions generated this way can be linked into reasoning chains for multi-hop retrieval, outperforming both passage-level RAG and knowledge graph-based approaches. The key advantage over triples is that propositions preserve natural language context — conditional clauses, hedges, exceptions — that triples discard.
 
-For a 1,000-word document, proposition extraction produces 20–50 propositions and costs ~1,000 input tokens plus ~200 output tokens per LLM call. At current API pricing, roughly $0.001–0.003 per document page.
+For a 1,000-word document, proposition extraction produces 20–50 propositions and costs ~1,000 input tokens plus ~200 output tokens per LLM call. At current API pricing, roughly \$0.001–0.003 per document page.
 
 ### Linking propositions to their parents
 
@@ -240,8 +240,8 @@ For a corpus of $N$ propositions (each document page produces roughly 30 proposi
 
 | Component | Cost per proposition |
 |---|---|
-| LLM extraction | ~$0.0001 |
-| Embedding (×3) | ~$0.00003 |
+| LLM extraction | ~\$0.0001 |
+| Embedding (×3) | ~\$0.00003 |
 | Qdrant storage | ~2 KB per point |
 
 A 100,000-page corpus produces roughly 3 million propositions, requiring ~6 GB of vector storage at 1536 dimensions with float32, or ~1.5 GB with int8 scalar quantization. Qdrant's quantization reduces memory footprint by up to 4× with minimal recall degradation.
