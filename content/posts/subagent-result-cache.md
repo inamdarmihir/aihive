@@ -54,17 +54,17 @@ This isn't a bug or a configuration problem — it is the mechanism. The isolati
 
 ### A Concrete Cost Walkthrough
 
-Consider a representative code-review session: an orchestrator (Sonnet) fans out three workers (Haiku) to summarize three modules, then synthesizes. Using mid-2026 Anthropic list prices as a reference ($3 / $15 per MTok input/output for Sonnet; $0.80 / $4 per MTok for Haiku), a single pass looks like this:
+Consider a representative code-review session: an orchestrator (Sonnet) fans out three workers (Haiku) to summarize three modules, then synthesizes. Using mid-2026 Anthropic list prices as a reference (\$3 / \$15 per MTok input/output for Sonnet; \$0.80 / \$4 per MTok for Haiku), a single pass looks like this:
 
 | Role | Model | Input tokens | Output tokens | Cost |
 |---|---|---|---|---|
-| Orchestrator (plan + synthesize) | Sonnet | 8,000 | 1,200 | $0.042 |
-| Worker A: summarize `auth/` | Haiku | 6,000 | 800 | $0.008 |
-| Worker B: summarize `billing/` | Haiku | 6,000 | 800 | $0.008 |
-| Worker C: summarize `api/` | Haiku | 6,000 | 800 | $0.008 |
-| **Session total** | | | | **$0.066** |
+| Orchestrator (plan + synthesize) | Sonnet | 8,000 | 1,200 | \$0.042 |
+| Worker A: summarize `auth/` | Haiku | 6,000 | 800 | \$0.008 |
+| Worker B: summarize `billing/` | Haiku | 6,000 | 800 | \$0.008 |
+| Worker C: summarize `api/` | Haiku | 6,000 | 800 | \$0.008 |
+| **Session total** | | | | **\$0.066** |
 
-The three workers account for about 36% of session cost. That fraction climbs when workers use Sonnet or when the fan-out grows to tens of pages. Across twenty daily review sessions with redundant re-summarization, worker waste lands around $0.50–$2.00 per developer — tens of dollars per day for a CI-integrated team.
+The three workers account for about 36% of session cost. That fraction climbs when workers use Sonnet or when the fan-out grows to tens of pages. Across twenty daily review sessions with redundant re-summarization, worker waste lands around \$0.50–\$2.00 per developer — tens of dollars per day for a CI-integrated team.
 
 What compounds the problem at fleet scale is **redundancy**. Across daily sessions, subagents repeatedly re-derive the same results:
 
@@ -86,7 +86,7 @@ $$\text{Cost} = \underbrace{C_{\text{in}} \cdot T_{\text{sys}}}_{\text{cached pr
 
 where $C_{\text{in}}$ and $C_{\text{out}}$ are the input and output token prices, and $T_{\text{sys}}$, $T_{\text{task}}$, $T_{\text{result}}$ are the token counts for the system prompt, task payload, and generated result respectively. In plain English: the bill is cheap input for the system prompt, cheap input for the task text, and expensive output for the result — and provider-side caching only discounts the first term.
 
-Provider-side caching reduces $C_{\text{in}} \cdot T_{\text{sys}}$. It does nothing for $C_{\text{out}} \cdot T_{\text{result}}$, and $C_{\text{out}}$ is typically 3–5× higher than $C_{\text{in}}$ on current frontier models. Using the worker numbers from §1: a Haiku worker with 6k input / 800 output pays roughly $0.0048 for input and $0.0032 for output. Even if prompt caching eliminated all input cost, you'd still pay the full $0.0032 for output on every redundant run.
+Provider-side caching reduces $C_{\text{in}} \cdot T_{\text{sys}}$. It does nothing for $C_{\text{out}} \cdot T_{\text{result}}$, and $C_{\text{out}}$ is typically 3–5× higher than $C_{\text{in}}$ on current frontier models. Using the worker numbers from §1: a Haiku worker with 6k input / 800 output pays roughly \$0.0048 for input and \$0.0032 for output. Even if prompt caching eliminated all input cost, you'd still pay the full \$0.0032 for output on every redundant run.
 
 Furthermore, provider-side caching is *stateless across sessions*. Each new session rebuilds the KV cache from scratch. An invocation on Monday and the same invocation on Thursday both pay full output token cost.
 
@@ -517,18 +517,18 @@ const summaries = await Promise.all(
 return synthesize(summaries);
 ```
 
-Assume `doc-summarizer` is marked `pure: true`, uses Haiku, and averages $0.008 per invocation (matching the worker numbers in §1). The corpus evolves slowly: on a typical day, 2–4 pages change.
+Assume `doc-summarizer` is marked `pure: true`, uses Haiku, and averages \$0.008 per invocation (matching the worker numbers in §1). The corpus evolves slowly: on a typical day, 2–4 pages change.
 
 | Run | Pages changed overnight | Exact hits | Misses | Hit rate | Worker API spend |
 |---|---|---|---|---|---|
-| Day 1 (cold) | — | 0 | 40 | 0% | $0.320 |
-| Day 2 | 3 | 37 | 3 | 92.5% | $0.024 |
-| Day 3 | 2 | 38 | 2 | 95.0% | $0.016 |
-| Day 4 | 4 | 36 | 4 | 90.0% | $0.032 |
-| Day 5 | 1 | 39 | 1 | 97.5% | $0.008 |
-| **Week total** | | **150** | **50** | **75%** | **$0.400** |
+| Day 1 (cold) | — | 0 | 40 | 0% | \$0.320 |
+| Day 2 | 3 | 37 | 3 | 92.5% | \$0.024 |
+| Day 3 | 2 | 38 | 2 | 95.0% | \$0.016 |
+| Day 4 | 4 | 36 | 4 | 90.0% | \$0.032 |
+| Day 5 | 1 | 39 | 1 | 97.5% | \$0.008 |
+| **Week total** | | **150** | **50** | **75%** | **\$0.400** |
 
-Without the cache, the week costs $1.60 in worker API spend (5 × $0.320). With exact-hash caching and content-hashed file keys, it costs $0.40 — a 75% reduction. Embedding and Qdrant overhead for 200 lookups is under $0.01 for the week (see §10).
+Without the cache, the week costs \$1.60 in worker API spend (5 × \$0.320). With exact-hash caching and content-hashed file keys, it costs \$0.40 — a 75% reduction. Embedding and Qdrant overhead for 200 lookups is under \$0.01 for the week (see §10).
 
 Two observations follow. First, the cold day dominates weekly cost; any workflow that re-runs daily over a mostly-stable corpus is an excellent fit. Second, hit rate is bounded by the change rate of the corpus, not by embedding quality — exact matching with content hashes makes that relationship linear and predictable. Semantic matching would not improve Day 2–5 numbers here, because the task strings for unchanged pages are already exact matches.
 
@@ -646,14 +646,14 @@ Take a mid-size fleet: $N = 1000$ dispatches/day, mixed Haiku workers at $C_{\te
 
 | Hit rate $\rho$ | Gross agent cost avoided | Embed + Qdrant overhead | Net daily saving $\Delta$ |
 |---|---|---|---|
-| 0% (cold / disabled) | $0.00 | $0.025 | −$0.025 |
-| 1% | $0.10 | $0.025 | $0.075 |
-| 10% | $1.00 | $0.025 | $0.975 |
-| 50% (map-reduce steady state) | $5.00 | $0.025 | $4.975 |
-| 75% (docs corpus from §7) | $7.50 | $0.025 | $7.475 |
-| 90% | $9.00 | $0.025 | $8.975 |
+| 0% (cold / disabled) | \$0.00 | \$0.025 | −\$0.025 |
+| 1% | \$0.10 | \$0.025 | \$0.075 |
+| 10% | \$1.00 | \$0.025 | \$0.975 |
+| 50% (map-reduce steady state) | \$5.00 | \$0.025 | \$4.975 |
+| 75% (docs corpus from §7) | \$7.50 | \$0.025 | \$7.475 |
+| 90% | \$9.00 | \$0.025 | \$8.975 |
 
-Annualized at 50% hit rate: roughly $1,800/year saved on a thousand-dispatch fleet, against infrastructure measured in tens of dollars. Map-reduce over unchanged inputs should approach 50–95% hit rates on repeated runs. The point isn't specific numbers — fleet data will vary — but that **the marginal cost of embedding is so low relative to subagent invocation that the break-even bar is trivially low**, unlike semantic caching at the end-user query layer.
+Annualized at 50% hit rate: roughly \$1,800/year saved on a thousand-dispatch fleet, against infrastructure measured in tens of dollars. Map-reduce over unchanged inputs should approach 50–95% hit rates on repeated runs. The point isn't specific numbers — fleet data will vary — but that **the marginal cost of embedding is so low relative to subagent invocation that the break-even bar is trivially low**, unlike semantic caching at the end-user query layer.
 
 ---
 
