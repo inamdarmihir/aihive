@@ -1,0 +1,28 @@
+{{- /*
+  Client-side LaTeX rendering for posts with `math: true` in front matter.
+
+  Goldmark's passthrough extension (see hugo.yaml) protects $...$ and $$...$$
+  spans from Markdown's inline parser (emphasis, etc.) so MathJax receives the
+  raw LaTeX source unchanged. MathJax is used instead of KaTeX because this
+  site's posts also use bare `$` for currency amounts (e.g. "$0.01"); MathJax's
+  processEscapes option lets `\$` render as a literal dollar sign, whereas
+  KaTeX's auto-render has no equivalent and will misinterpret currency as math.
+*/ -}}
+{{- if .Param "math" -}}
+<script>
+  MathJax = {
+    tex: {
+      inlineMath: [['$', '$'], ['\\(', '\\)']],
+      displayMath: [['$$', '$$'], ['\\[', '\\]']],
+      processEscapes: true
+    },
+    options: {
+      skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code']
+    },
+    loader: {
+      load: ['ui/safe']
+    }
+  };
+</script>
+<script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@4/tex-mml-chtml.js"></script>
+{{- end -}}
