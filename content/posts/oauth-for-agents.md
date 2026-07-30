@@ -109,7 +109,7 @@ The agent loop calls `refresh_if_needed` before each round of tool calls and onl
 
 ## A Qdrant-Backed Delegation Anomaly Detector
 
-Individual token validation (signature, expiry, audience) is necessary and already handled by standard OAuth libraries; it says nothing about whether a *particular* delegation chain, even a cryptographically valid one, looks like this user's normal usage. A lightweight side-layer: embed a compact representation of each request's delegation shape — the actor chain, the requested scope, the resource being accessed — and flag chains that sit far from a user's historical pattern, the same anomaly-detection shape used elsewhere on this blog for [tool-response anomalies](/posts/silent-failures-mcp-agents/):
+Individual token validation (signature, expiry, audience) is necessary and already handled by standard OAuth libraries; it says nothing about whether a *particular* delegation chain, even a cryptographically valid one, looks like this user's normal usage. A lightweight side-layer: embed a compact representation of each request's delegation shape — the actor chain, the requested scope, the resource being accessed — and flag chains that sit far from a user's historical pattern, the same anomaly-detection shape used elsewhere on this blog for [tool-response anomalies](/posts/mcp-response-guard/):
 
 ```python
 import uuid
