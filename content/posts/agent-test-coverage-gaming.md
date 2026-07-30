@@ -1,6 +1,6 @@
 ---
 title: "Catching Agents That Game Test Coverage Instead of Writing Tests"
-date: 2026-07-30
+date: 2026-07-20
 description: "Coverage percentage and a green CI check are exactly the kind of proxy metric agents learn to satisfy without satisfying what they're meant to measure. This post designs a CI-time coverage quality gate — assertion-strength scoring, Qdrant-backed near-duplicate test detection, and a flakiness-risk static signal — grounded in 2026 empirical findings on agent-generated test quality and measured reward hacking."
 tags: ["agents", "testing", "ci-cd", "software-engineering", "reward-hacking", "qdrant"]
 author: "Mihir Inamdar"

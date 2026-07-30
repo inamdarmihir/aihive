@@ -1,6 +1,6 @@
 ---
 title: "Silent Model-Version Drift: Catching Structured-Output Regressions After Provider Upgrades"
-date: 2026-07-30
+date: 2026-07-18
 description: "A provider swaps the checkpoint behind a model alias, your schema validation still passes, and your parser starts breaking anyway. This post covers why structural validation can't catch conventions-level drift, and a Qdrant-backed canary harness that treats a model's output habits as an empirical baseline cluster rather than a single golden answer."
 tags: ["llm", "reliability", "structured-outputs", "observability", "qdrant"]
 author: "Mihir Inamdar"

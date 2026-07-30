@@ -1,6 +1,6 @@
 ---
 title: "subagent-cache: A Working Content-Addressed Cache for Deep Agents Subagent Dispatch"
-date: 2026-07-20
+date: 2026-07-04
 description: "The implementation spec for subagent-cache, a content-addressed result cache for Deep Agents subagent dispatch: canonical cache keys, a Qdrant-backed store with named vectors, a wrap_tool_call middleware, provenance-based invalidation, and a break-even cost model."
 tags: ["agents", "deepagents", "caching", "qdrant", "middleware", "cost-optimization"]
 author: "Mihir Inamdar"

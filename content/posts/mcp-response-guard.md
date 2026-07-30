@@ -1,6 +1,6 @@
 ---
 title: "mcp-response-guard: A Schema-Aware Validator for Incomplete Tool Responses"
-date: 2026-07-24
+date: 2026-07-06
 description: "The spec for mcp-response-guard, an installable interceptor library that catches silent, schema-valid-but-incomplete MCP tool responses using expectation schemas, calibrated anomaly scoring, and a Qdrant-backed memory of what normal looks like."
 tags: ["agents", "mcp", "qdrant", "validation", "reliability", "tool-calling"]
 author: "Mihir Inamdar"

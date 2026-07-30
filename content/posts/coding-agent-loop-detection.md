@@ -1,6 +1,6 @@
 ---
 title: "Killing Tool-Call Loops Before They Burn Your Coding Agent's Budget"
-date: 2026-07-30
+date: 2026-07-12
 description: "A coding agent chasing a failing test rarely repeats the exact same tool call twice when it's stuck — it paraphrases its own unsuccessful attempt, which defeats exact-match and simple-diff loop detectors while still being the same unproductive action repeated. This post covers a session-local, embedding-based loop guard that checks the meaning of consecutive actions and outcomes, backed by an ephemeral, session-scoped Qdrant collection rather than a persistent corpus."
 tags: ["agents", "coding-agents", "reliability", "cost-optimization", "qdrant"]
 author: "Mihir Inamdar"

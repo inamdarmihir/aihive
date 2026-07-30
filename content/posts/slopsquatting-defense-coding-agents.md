@@ -1,6 +1,6 @@
 ---
 title: "Slopsquatting: A Pre-Install Gate for Autonomous Coding Agents"
-date: 2026-07-30
+date: 2026-07-26
 description: "LLMs have hallucinated package names for years, but the execution model just changed: an autonomous coding agent now runs pip install and npm install itself, with no human eyeballing the name first. This post designs a layered pre-install gate for that new reality, where a plain registry-existence check is necessary but not sufficient, and Qdrant does two structurally different jobs — catching typosquats an attacker got to first, and proactively predicting which conflation-style names your own agents are likely to invent next."
 tags: ["agents", "security", "supply-chain", "coding-agents", "qdrant"]
 author: "Mihir Inamdar"
