@@ -1,7 +1,7 @@
 ---
-title: "Silent Model-Version Drift: Catching Structured-Output Regressions After Provider Upgrades"
+title: "Canary: A Behavioral Drift Harness for Structured LLM Outputs"
 date: 2026-07-18
-description: "A provider swaps the checkpoint behind a model alias, your schema validation still passes, and your parser starts breaking anyway. This post covers why structural validation can't catch conventions-level drift, and a Qdrant-backed canary harness that treats a model's output habits as an empirical baseline cluster rather than a single golden answer."
+description: "A provider swaps the checkpoint behind a model alias, your schema validation still passes, and your parser starts breaking anyway. Canary is a small, pip-installable eval harness that runs on a schedule against your existing structured-output pipeline, catching conventions-level drift that structural validation can't see by treating a model's output habits as a Qdrant-backed empirical baseline cluster rather than a single golden answer."
 tags: ["llm", "reliability", "structured-outputs", "observability", "qdrant"]
 author: "Mihir Inamdar"
 showToc: true
@@ -10,23 +10,24 @@ math: true
 
 Every major provider — **OpenAI**, **Anthropic**, **Google** — ships model updates behind aliases that are not hard version pins: a `-latest` suffix, a default model name, or simply "the model behind this API key" can resolve to a materially different checkpoint on a schedule the provider controls, not you. None of this is secret; it's documented lifecycle policy. What's less discussed is the specific failure mode it creates for teams built on structured output, JSON mode, or function calling: a routine upgrade can change a model's output *conventions* — whether it wraps JSON in a markdown fence, how it represents an absent value, how verbose its string fields are, which casing an enum-like field uses — while the output remains perfectly schema-valid. Nothing throws. Nothing alerts. The pipeline just starts producing subtly different data than it did yesterday.
 
-This post covers why schema validation alone cannot catch this class of regression, and how to build a canary evaluation harness that can — using a small, fixed, production-realistic prompt suite run on a schedule, and a Qdrant-backed behavioral baseline that treats "what does this model normally do" as an empirical cluster rather than a single fixed golden output. I'm scoping this deliberately: this is not a post about prompt injection, not about hallucination detection, and not a takedown of any specific provider or a specific dated incident — it's a systemic risk that shows up repeatedly across every provider's model lifecycle, and the mitigation is provider-agnostic. Familiarity with structured output / function calling and with basic vector search concepts is assumed.
+This post covers why schema validation alone cannot catch this class of regression, and specs **Canary**, an evaluation harness that can — a small, pip-installable library that runs a fixed, production-realistic prompt suite against your existing model client on a schedule, and a Qdrant-backed behavioral baseline that treats "what does this model normally do" as an empirical cluster rather than a single fixed golden output. I'm scoping this deliberately: this is not a post about prompt injection, not about hallucination detection, and not a takedown of any specific provider or a specific dated incident — it's a systemic risk that shows up repeatedly across every provider's model lifecycle, and the mitigation is provider-agnostic. Familiarity with structured output / function calling and with basic vector search concepts is assumed.
 
 ## Table of Contents
 
 1. [The Failure Mode: Schema-Valid, Convention-Broken](#the-failure-mode-schema-valid-convention-broken)
 2. [Why Schema Validation Can't See This](#why-schema-validation-cant-see-this)
 3. [A Taxonomy of Convention Drift](#a-taxonomy-of-convention-drift)
-4. [Design: A Canary Eval Harness](#design-a-canary-eval-harness)
+4. [Design: Canary's Eval Harness](#design-canarys-eval-harness)
 5. [Component One: The Canary Prompt Suite](#component-one-the-canary-prompt-suite)
 6. [Component Two: Qdrant as the Behavioral Baseline](#component-two-qdrant-as-the-behavioral-baseline)
 7. [Component Three: Baseline Cluster Construction](#component-three-baseline-cluster-construction)
 8. [Component Four: The Drift-Scoring Query](#component-four-the-drift-scoring-query)
 9. [Putting It Together: The Canary Runner](#putting-it-together-the-canary-runner)
-10. [Worked Example: The Order-Status Prompt](#worked-example-the-order-status-prompt)
-11. [Where This Fits Relative to Standard Practices](#where-this-fits-relative-to-standard-practices)
-12. [Challenges and Open Problems](#challenges-and-open-problems)
-13. [References](#references)
+10. [Installing and Using Canary](#installing-and-using-canary)
+11. [Worked Example: The Order-Status Prompt](#worked-example-the-order-status-prompt)
+12. [Where This Fits Relative to Standard Practices](#where-this-fits-relative-to-standard-practices)
+13. [Challenges and Open Problems](#challenges-and-open-problems)
+14. [References](#references)
 
 ## The Failure Mode: Schema-Valid, Convention-Broken
 
@@ -117,7 +118,7 @@ These heuristics are deliberately narrow and interpretable — `has_wrapper_text
 
 What heuristics can't do is generalize past the specific patterns someone thought to encode — a verbosity shift, a subtly different word choice for the same underlying value, or a wrapper phrase that doesn't match any regex written in advance all slip past a fixed heuristic set. That's the gap the embedding-based canary detector below is built to close: it doesn't need to know in advance what kind of drift to look for, only that the new output is textually distant from what this exact prompt has produced before.
 
-## Design: A Canary Eval Harness
+## Design: Canary's Eval Harness
 
 The mitigation this post develops is a **canary eval harness**: a small, fixed suite of production-realistic structured-output prompts, run repeatedly against the exact model configuration used in production, on a schedule — nightly, and additionally whenever a provider announces or is suspected of rotating a model version behind an alias you use. This is emphatically not one-off ad hoc testing done once after a migration and never revisited; the value is in the repetition, because a canary suite run once tells you whether *this* output looks reasonable, while a canary suite run nightly against a stable baseline tells you the moment behavior starts moving.
 
@@ -460,6 +461,44 @@ async def run_canary_suite(
 ```
 
 The runner never blocks a deployment by itself — it produces a report. A flagged row routes to whatever review surface the team already uses (a Slack alert, a dashboard, a ticket), with the raw output attached so a human can see exactly what changed. Only outputs that pass *both* checks get added to the baseline, which keeps the cluster from slowly absorbing drifted outputs as if they were normal — an important property, discussed further below.
+
+## Installing and Using Canary
+
+Canary ships as a single pip-installable package that wraps around whatever provider SDK you already use — it doesn't require switching model clients or adopting a new orchestration framework:
+
+```bash
+pip install canary-outputs
+```
+
+```
+canary/
+├── suite.py       # CanaryPrompt, the fixed production-realistic prompt set
+├── baseline.py     # BaselineStore (Qdrant-backed cluster of accepted outputs)
+├── detector.py       # DriftDetector, the percentile-based drift score
+└── runner.py           # run_canary_suite(), scheduling glue
+```
+
+A minimal scheduled run against an existing OpenAI/Anthropic client:
+
+```python
+from canary.suite import load_suite
+from canary.baseline import BaselineStore
+from canary.detector import DriftDetector
+from canary.runner import run_canary_suite
+
+store = BaselineStore(url="https://your-cluster.qdrant.io", api_key="...")
+detector = DriftDetector(store, percentile_threshold=0.95)
+
+results = await run_canary_suite(
+    suite=load_suite("canary_prompts.yaml"),
+    model_client=your_existing_model_client,
+    store=store,
+    detector=detector,
+    validate_schema=your_jsonschema_validate_fn,
+)
+```
+
+Wiring this into a cron job or a CI scheduled workflow (`schedule:` in GitHub Actions, an Airflow DAG, a Temporal cron workflow) is the typical deployment shape — Canary itself has no opinion about the scheduler, since its public interface is a single async function call that returns a plain list of dicts.
 
 ## Worked Example: The Order-Status Prompt
 

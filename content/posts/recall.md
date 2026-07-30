@@ -1,14 +1,14 @@
 ---
-title: "subagent-cache: A Working Content-Addressed Cache for Deep Agents Subagent Dispatch"
+title: "Recall: A Working Content-Addressed Cache for Deep Agents Subagent Dispatch"
 date: 2026-07-04
-description: "The implementation spec for subagent-cache, a content-addressed result cache for Deep Agents subagent dispatch: canonical cache keys, a Qdrant-backed store with named vectors, a wrap_tool_call middleware, provenance-based invalidation, and a break-even cost model."
+description: "The implementation spec for Recall, a content-addressed result cache for Deep Agents subagent dispatch: canonical cache keys, a Qdrant-backed store with named vectors, a wrap_tool_call middleware, provenance-based invalidation, and a break-even cost model."
 tags: ["agents", "deepagents", "caching", "qdrant", "middleware", "cost-optimization"]
 author: "Mihir Inamdar"
 showToc: true
 math: true
 ---
 
-Multi-agent frameworks solve context rot by isolating work into subagents — each with its own context window, its own tool access, its own billing. The isolation is the point. But it comes with a structural cost that nobody addresses by default: every subagent re-derives results from scratch, even when the underlying inputs haven't changed. This post is the implementation spec for **subagent-cache**, a content-addressed result cache for Deep Agents dispatch, packaged as an `AgentMiddleware` backed by Qdrant. I cover the module layout, cache-key design, the Qdrant collection schema, the middleware's hook points, and the conditions under which the cache is safe, unsafe, and economically significant — precise enough to build, not just discuss.
+Multi-agent frameworks solve context rot by isolating work into subagents — each with its own context window, its own tool access, its own billing. The isolation is the point. But it comes with a structural cost that nobody addresses by default: every subagent re-derives results from scratch, even when the underlying inputs haven't changed. This post is the implementation spec for **Recall**, a content-addressed result cache for Deep Agents dispatch, packaged as an `AgentMiddleware` backed by Qdrant. I cover the module layout, cache-key design, the Qdrant collection schema, the middleware's hook points, and the conditions under which the cache is safe, unsafe, and economically significant — precise enough to build, not just discuss.
 
 I focus specifically on the **static-dispatch** path (the `task` tool in `SubAgentMiddleware`) and the **dynamic-dispatch** path (programmatic fan-out via `CodeInterpreterMiddleware`). I won't cover caching for the model itself — provider-side prompt caching already handles prefix deduplication at the API layer. What's missing is result-level memoization above the API, which is what this library provides.
 
@@ -18,7 +18,7 @@ I focus specifically on the **static-dispatch** path (the `task` tool in `SubAge
 2. [Why Provider-Side Prompt Caching Doesn't Close the Gap](#2-why-provider-side-prompt-caching-doesnt-close-the-gap)
 3. [Content-Addressed Caching: The Core Idea](#3-content-addressed-caching-the-core-idea)
 4. [Package Layout and Design Overview](#4-package-layout-and-design-overview)
-5. [Installing and Using subagent-cache](#5-installing-and-using-subagent-cache)
+5. [Installing and Using Recall](#5-installing-and-using-recall)
 6. [keys.py: Cache Key Design](#6-keyspy-cache-key-design)
 7. [store.py: Qdrant Collection Design](#7-storepy-qdrant-collection-design)
 8. [middleware.py: The wrap_tool_call Middleware](#8-middlewarepy-the-wrap_tool_call-middleware)
@@ -55,7 +55,7 @@ What compounds the problem at fleet scale is **redundancy**. Across daily sessio
 - "Classify this GitHub issue into one of four triage buckets" — dispatched N times for N issues, many of which share near-identical descriptions.
 - "Lint this module for security anti-patterns" — invoked per-file in a map-style workflow, with identical results for files that didn't touch the relevant patterns.
 
-The current answer is model routing: use cheaper models for workers (Haiku is roughly 5× cheaper than Opus on output). This is the right lever, but it requires humans to configure a static policy at definition time, and one environment variable can silently undo it. More fundamentally, it reduces per-call cost; it doesn't eliminate redundant calls. That's the gap `subagent-cache` closes.
+The current answer is model routing: use cheaper models for workers (Haiku is roughly 5× cheaper than Opus on output). This is the right lever, but it requires humans to configure a static policy at definition time, and one environment variable can silently undo it. More fundamentally, it reduces per-call cost; it doesn't eliminate redundant calls. That's the gap `recall` closes.
 
 ## 2. Why Provider-Side Prompt Caching Doesn't Close the Gap
 
@@ -69,7 +69,7 @@ where $C_{\text{in}}$ and $C_{\text{out}}$ are the input and output token prices
 
 Provider-side caching reduces $C_{\text{in}} \cdot T_{\text{sys}}$. It does nothing for $C_{\text{out}} \cdot T_{\text{result}}$, and $C_{\text{out}}$ is typically 3–5× higher than $C_{\text{in}}$ on current frontier models. Using the worker numbers from §1: a Haiku worker with 6k input / 800 output pays roughly \$0.0048 for input and \$0.0032 for output. Even if prompt caching eliminated all input cost, you'd still pay the full \$0.0032 for output on every redundant run.
 
-Furthermore, provider-side caching is *stateless across sessions*. Each new session rebuilds the KV cache from scratch. An invocation on Monday and the same invocation on Thursday both pay full output token cost. `subagent-cache` targets exactly this gap: a persistent, cross-session, result-level cache.
+Furthermore, provider-side caching is *stateless across sessions*. Each new session rebuilds the KV cache from scratch. An invocation on Monday and the same invocation on Thursday both pay full output token cost. `recall` targets exactly this gap: a persistent, cross-session, result-level cache.
 
 ## 3. Content-Addressed Caching: The Core Idea
 
@@ -81,14 +81,14 @@ $$f: (\theta, \sigma, x) \rightarrow r$$
 
 where $\theta$ is the subagent type (name, system prompt, model, tool schema version), $\sigma$ is any shared state the invocation reads, $x$ is the task-specific input payload, and $r$ is the result. If $f$ is *pure* — deterministic and free of side effects — then for identical $(\theta, \sigma, x)$ tuples, $r$ is always the same, and we can cache. In plain English: unchanged definition, state, and task payload means unchanged result — so we should not pay to regenerate it.
 
-The challenge is that most useful subagents are not obviously pure. They may read files, search the web, or call external APIs. `subagent-cache` restricts to subagents an operator flags `pure`, and carries provenance about what those subagents read so results can be invalidated when inputs change — that's `invalidation.py`.
+The challenge is that most useful subagents are not obviously pure. They may read files, search the web, or call external APIs. `recall` restricts to subagents an operator flags `pure`, and carries provenance about what those subagents read so results can be invalidated when inputs change — that's `invalidation.py`.
 
 ## 4. Package Layout and Design Overview
 
-`subagent-cache` is four modules: pure key computation, the Qdrant-backed store, the middleware that wires into Deep Agents, and invalidation logic kept deliberately separate from the hot path.
+`recall` is four modules: pure key computation, the Qdrant-backed store, the middleware that wires into Deep Agents, and invalidation logic kept deliberately separate from the hot path.
 
 ```
-subagent_cache/
+recall/
   __init__.py          # public re-exports
   keys.py              # canonicalize(), compute_key(), purity classification
   store.py             # Qdrant collection setup, lookup_exact/lookup_semantic, insert
@@ -111,24 +111,24 @@ subagent_cache/
 └────────────────────────────────────────────────────────────────┘
                     │                              ▲
                     ▼                              │
-             subagent_cache collection (Qdrant, named vectors)
+             recall collection (Qdrant, named vectors)
 ```
 
-## 5. Installing and Using subagent-cache
+## 5. Installing and Using Recall
 
 The package targets Python 3.11+, depends on `qdrant-client>=1.18` for the current `query_points` API, and the `deepagents` middleware protocol. Embeddings are pluggable and only required when semantic matching is opted in.
 
 ```bash
-pip install subagent-cache
+pip install recall-agents
 # optional: bundled local embeddings for semantic-match mode
-pip install "subagent-cache[fastembed]"
+pip install "recall-agents[fastembed]"
 ```
 
 Attaching it to a Deep Agents pipeline is a single middleware registration:
 
 ```python
 from deepagents import create_deep_agent
-from subagent_cache import SubagentResultCacheMiddleware
+from recall import SubagentResultCacheMiddleware
 
 cache_middleware = SubagentResultCacheMiddleware(
     qdrant_url="http://localhost:6333",
@@ -319,7 +319,7 @@ from qdrant_client.models import (
 EMBED_DIM = 384  # FastEmbed / all-MiniLM-L6-v2; use 1536 for text-embedding-3-small
 
 
-async def ensure_collection(client: AsyncQdrantClient, collection: str = "subagent_cache") -> None:
+async def ensure_collection(client: AsyncQdrantClient, collection: str = "recall") -> None:
     existing = {c.name for c in (await client.get_collections()).collections}
     if collection not in existing:
         await client.create_collection(
@@ -351,7 +351,7 @@ The **exact lookup** path queries Qdrant as a key-value store via `scroll` on th
 
 ```python
 class SubagentCacheStore:
-    def __init__(self, client: AsyncQdrantClient, collection: str = "subagent_cache"):
+    def __init__(self, client: AsyncQdrantClient, collection: str = "recall"):
         self.client, self.collection = client, collection
 
     async def lookup_exact(self, exact_hash: str, subagent_type: str) -> dict | None:
@@ -422,9 +422,9 @@ from datetime import datetime, timezone
 from uuid import uuid4
 from deepagents.middleware import AgentMiddleware
 from qdrant_client import AsyncQdrantClient
-from subagent_cache.keys import compute_key, extract_source_refs, canonicalize
-from subagent_cache.store import SubagentCacheStore, ensure_collection
-from subagent_cache.invalidation import verify_provenance
+from recall.keys import compute_key, extract_source_refs, canonicalize
+from recall.store import SubagentCacheStore, ensure_collection
+from recall.invalidation import verify_provenance
 
 
 class SubagentResultCacheMiddleware(AgentMiddleware):
@@ -432,7 +432,7 @@ class SubagentResultCacheMiddleware(AgentMiddleware):
         self,
         qdrant_url: str,
         profiles: dict[str, dict],
-        collection: str = "subagent_cache",
+        collection: str = "recall",
         exact_only: bool = True,
         similarity_threshold: float = 0.97,
         vfs_root: str | None = None,
@@ -661,8 +661,8 @@ Annualized at 50% hit rate: roughly \$1,800/year saved on a thousand-dispatch fl
 ## 14. References
 
 ```bibtex
-@misc{subagent-cache-2026,
-  title   = {subagent-cache: A Working Content-Addressed Cache for Deep Agents Subagent Dispatch},
+@misc{recall-2026,
+  title   = {recall: A Working Content-Addressed Cache for Deep Agents Subagent Dispatch},
   author  = {Inamdar, Mihir},
   year    = {2026},
   note    = {Blog post, July 2026}

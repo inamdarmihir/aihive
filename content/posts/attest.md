@@ -1,7 +1,7 @@
 ---
-title: "Before You Connect: Verifying MCP Server Identity Against Lookalikes"
+title: "Attest: A Pre-Connection Trust Gate for MCP Server Discovery"
 date: 2026-07-16
-description: "MCP server discovery has moved from a colleague handing you a URL to searchable public directories that agents browse on their own. A server calling itself 'gdrive-search' and describing itself almost identically to the trusted 'gdrive-connector' should not get the same casual click-to-connect treatment. This post covers a Qdrant-backed trust-verification layer that runs before any OAuth flow starts."
+description: "MCP server discovery has moved from a colleague handing you a URL to searchable public directories that agents browse on their own. A server calling itself 'gdrive-search' and describing itself almost identically to the trusted 'gdrive-connector' should not get the same casual click-to-connect treatment. Attest is a Qdrant-backed trust-verification library that plugs into an existing MCP client and runs before any OAuth flow starts."
 tags: ["agents", "mcp", "security", "supply-chain", "qdrant"]
 author: "Mihir Inamdar"
 showToc: true
@@ -10,23 +10,24 @@ math: true
 
 Discovering an MCP server used to mean a colleague pasted you a URL, or you read the README of a repo you already trusted for other reasons. In 2026 it increasingly means searching a directory — **Claude's** connector directory, and, since a July 9, 2026 migration, **OpenAI's** Plugin directory serving both ChatGPT and Codex — and clicking the top result, or letting an agent do the searching and connecting on your behalf without a human ever looking at the URL at all. That shift changes the trust model completely. A hand-off URL from a colleague carries an implicit vouch. A search result carries none: the only thing distinguishing a legitimate server from a lookalike is a self-declared name, a self-declared description, and a self-declared tool list, none of which the protocol certifies as accurate.
 
-This post is about that specific, narrow decision point — whether to trust and connect to a server you've just discovered — and a Qdrant-backed verification layer that sits client-side, before any authorization flow begins. It is explicitly not about OAuth scoping (which governs what an already-trusted server's token can do) and not about tool-schema design (which governs how a tool you built describes itself to a model). Those are covered well elsewhere; this post covers the moment before either of them applies, which is also the moment where the least tooling currently exists to help. Familiarity with MCP's basic client/server/tool model and with vector similarity search is assumed.
+This post is about that specific, narrow decision point — whether to trust and connect to a server you've just discovered — and **Attest**, a Qdrant-backed verification library that sits client-side, before any authorization flow begins, wired into an existing MCP client as a single pre-connection function call. It is explicitly not about OAuth scoping (which governs what an already-trusted server's token can do) and not about tool-schema design (which governs how a tool you built describes itself to a model). Those are covered well elsewhere; this post covers the moment before either of them applies, which is also the moment where the least tooling currently exists to help. Familiarity with MCP's basic client/server/tool model and with vector similarity search is assumed.
 
 ## Table of Contents
 
 1. [The Decision Point: Trusting a Server You've Just Discovered](#the-decision-point-trusting-a-server-youve-just-discovered)
 2. [Why This Is a Different Problem](#why-this-is-a-different-problem)
 3. [The Ecosystem Reality: A Young, Unvetted Long Tail](#the-ecosystem-reality-a-young-unvetted-long-tail)
-4. [Design: An MCP Server Trust-Verification Layer](#design-an-mcp-server-trust-verification-layer)
+4. [Design: Attest's Trust-Verification Layer](#design-attests-trust-verification-layer)
 5. [Component One: The Trusted Corpus](#component-one-the-trusted-corpus)
 6. [Component Two: The Lookalike-Identity Check](#component-two-the-lookalike-identity-check)
 7. [Component Three: The Tool-Set Overlap Check](#component-three-the-tool-set-overlap-check)
 8. [Putting It Together: The Pre-Connection Gate](#putting-it-together-the-pre-connection-gate)
-9. [Worked Example: gdrive-search-mcp vs. gdrive-searchmcp](#worked-example-gdrive-search-mcp-vs-gdrive-searchmcp)
-10. [Composing With OAuth Scoping](#composing-with-oauth-scoping)
-11. [What Directories Could Do to Make This Layer Unnecessary](#what-directories-could-do-to-make-this-layer-unnecessary)
-12. [Challenges and Open Problems](#challenges-and-open-problems)
-13. [References](#references)
+9. [Installing and Using Attest](#installing-and-using-attest)
+10. [Worked Example: gdrive-search-mcp vs. gdrive-searchmcp](#worked-example-gdrive-search-mcp-vs-gdrive-searchmcp)
+11. [Composing With OAuth Scoping](#composing-with-oauth-scoping)
+12. [What Directories Could Do to Make This Layer Unnecessary](#what-directories-could-do-to-make-this-layer-unnecessary)
+13. [Challenges and Open Problems](#challenges-and-open-problems)
+14. [References](#references)
 
 ## The Decision Point: Trusting a Server You've Just Discovered
 
@@ -62,7 +63,7 @@ Package registries went through this exact progression years earlier, and the pa
 
 MCP server directories reproduce the same structure with none of the mitigations package registries eventually built. There is no scaled, cross-directory verified-publisher signal comparable to what npm or PyPI now offer. There is no established download-count or reputation-weighted ranking mature enough to reliably push an impersonator below the legitimate result. And, in the added wrinkle specific to agentic systems, the entity doing the "typing" that might produce a near-name collision is sometimes an agent's own search query or an LLM's paraphrase of what it's looking for, not a human's keystroke — which means the slopsquatting dynamic (a name an *agent* is statistically likely to guess or search for, rather than one a human is likely to mistype) is arguably a more natural fit for MCP discovery than for package installation, where a human is still usually the one typing the command.
 
-## Design: An MCP Server Trust-Verification Layer
+## Design: Attest's Trust-Verification Layer
 
 The layer this post develops sits client-side — inside the agent framework itself, or as a thin proxy in front of every connection attempt — and runs exactly once, at discovery time, before any OAuth authorization request is sent to the candidate server.
 
@@ -430,6 +431,49 @@ def log_decision(store, record: TrustDecisionRecord) -> None:
 ```
 
 The distinction between the corpus (what's currently trusted) and the decision log (what was ever decided, and by whom) matters because they answer different questions later: the corpus answers "should a new candidate be flagged against this entry," while the log answers "who approved this server, and when, and on what evidence" — the question that actually comes up during an incident review, and one a corpus that only stores current state can't answer once an entry has been superseded or removed.
+
+## Installing and Using Attest
+
+Attest ships as a single pip-installable package that wraps around an existing MCP client rather than replacing it:
+
+```bash
+pip install attest-mcp
+```
+
+```
+attest/
+├── corpus.py       # TrustedCorpus: known-good servers, publishers, tool sets
+├── lookalike.py      # check_lookalike_identity()
+├── toolset.py          # check_toolset_overlap()
+├── gate.py               # pre_connection_check(), TrustVerdict
+└── audit.py                # TrustDecisionRecord, log_decision()
+```
+
+Wiring Attest into an MCP client's connection flow is a single call inserted before the existing OAuth authorization step:
+
+```python
+from attest.gate import pre_connection_check
+from attest.corpus import TrustedCorpus
+
+corpus = TrustedCorpus(url="https://your-cluster.qdrant.io", api_key="...")
+
+verdict = pre_connection_check(
+    corpus,
+    candidate_name=discovered_server.name,
+    candidate_description=discovered_server.description,
+    candidate_publisher=discovered_server.publisher,
+    candidate_declared_tools=discovered_server.tools,
+)
+
+if verdict.blocked:
+    raise ConnectionBlocked(verdict.signals)
+if verdict.needs_review:
+    surface_for_human_confirmation(verdict.signals)
+else:
+    proceed_to_oauth_authorization()  # your existing MCP client's normal flow, untouched
+```
+
+Attest doesn't implement its own MCP client or OAuth handling — it's a pure decision function that any client-side integration (a custom agent harness, a directory browser, an internal connector gateway) calls with the server metadata it already has on hand before initiating a connection.
 
 ## Worked Example: gdrive-search-mcp vs. gdrive-searchmcp
 

@@ -1,30 +1,30 @@
 ---
-title: "Killing Tool-Call Loops Before They Burn Your Coding Agent's Budget"
+title: "Breaker: A Session-Local Loop Guard for Coding Agents"
 date: 2026-07-12
-description: "A coding agent chasing a failing test rarely repeats the exact same tool call twice when it's stuck — it paraphrases its own unsuccessful attempt, which defeats exact-match and simple-diff loop detectors while still being the same unproductive action repeated. This post covers a session-local, embedding-based loop guard that checks the meaning of consecutive actions and outcomes, backed by an ephemeral, session-scoped Qdrant collection rather than a persistent corpus."
+description: "A coding agent chasing a failing test rarely repeats the exact same tool call twice when it's stuck — it paraphrases its own unsuccessful attempt, which defeats exact-match and simple-diff loop detectors while still being the same unproductive action repeated. Breaker is a pip-installable, session-local, embedding-based loop guard you wrap around an existing tool-calling loop; it checks the meaning of consecutive actions and outcomes, backed by an ephemeral, session-scoped Qdrant collection rather than a persistent corpus."
 tags: ["agents", "coding-agents", "reliability", "cost-optimization", "qdrant"]
 author: "Mihir Inamdar"
 showToc: true
 math: true
 ---
 
-An autonomous coding agent chasing a failing test, a build error, or an elusive bug can get stuck in a loop: repeatedly attempting near-identical fixes, re-reading the same file without changing approach, or oscillating between two edits that each break what the other one fixed. This burns tokens and wall-clock time for many turns before a human notices, or before a blunt fixed-iteration cap eventually kicks in — sometimes too late, after real spend; sometimes too early, cutting off a legitimately converging fix that needed two more turns. This is a widely-observed operational reality of running coding agents unattended on real repositories, not something tied to a single dated incident, so I'm not going to anchor this post on one. What I am scoping it to: session-local detection of unproductive repetition, evaluated incrementally after every tool call, as opposed to cross-session learning from past failures (a different, complementary problem) or hard iteration ceilings (a blunt instrument this post argues is necessary but not sufficient on its own). Required background: basic familiarity with how agent frameworks structure a tool-calling loop and with the general concept of a recursion or iteration limit as a safety net.
+An autonomous coding agent chasing a failing test, a build error, or an elusive bug can get stuck in a loop: repeatedly attempting near-identical fixes, re-reading the same file without changing approach, or oscillating between two edits that each break what the other one fixed. This burns tokens and wall-clock time for many turns before a human notices, or before a blunt fixed-iteration cap eventually kicks in — sometimes too late, after real spend; sometimes too early, cutting off a legitimately converging fix that needed two more turns. This is a widely-observed operational reality of running coding agents unattended on real repositories, not something tied to a single dated incident, so I'm not going to anchor this post on one. This post is the spec for **Breaker**, a session-local loop guard that wraps around an existing agent's tool-calling loop and evaluates incrementally after every tool call — as opposed to cross-session learning from past failures (a different, complementary problem) or hard iteration ceilings (a blunt instrument this post argues Breaker complements, not replaces). Required background: basic familiarity with how agent frameworks structure a tool-calling loop and with the general concept of a recursion or iteration limit as a safety net.
 
 ## Table of Contents
 
 1. [The Loop Problem in Production Coding Agents](#the-loop-problem-in-production-coding-agents)
 2. [Why Exact-Match and Textual-Similarity Checks Both Fail](#why-exact-match-and-textual-similarity-checks-both-fail)
-3. [Designing a Session-Local Loop Guard](#designing-a-session-local-loop-guard)
+3. [Designing Breaker: A Session-Local Loop Guard](#designing-breaker-a-session-local-loop-guard)
 4. [Qdrant as the Side-Piece: Ephemeral and Session-Scoped, Not a Persistent Corpus](#qdrant-as-the-side-piece-ephemeral-and-session-scoped-not-a-persistent-corpus)
 5. [Component One: The Action-Outcome Signature](#component-one-the-action-outcome-signature)
 6. [Component Two: The Ephemeral Per-Session Collection](#component-two-the-ephemeral-per-session-collection)
 7. [Component Three: The Rolling-Window Similarity Check](#component-three-the-rolling-window-similarity-check)
 8. [Defining the Trigger Condition Precisely](#defining-the-trigger-condition-precisely)
-9. [What Happens When the Guard Fires: an Escalation Ladder](#what-happens-when-the-guard-fires-an-escalation-ladder)
+9. [What Happens When Breaker Fires: an Escalation Ladder](#what-happens-when-breaker-fires-an-escalation-ladder)
 10. [Component Four: Escalation Logic](#component-four-escalation-logic)
-11. [The Guard Complements a Fixed Cap, It Doesn't Replace One](#the-guard-complements-a-fixed-cap-it-doesnt-replace-one)
-12. [Wiring the Guard Into the Tool-Calling Loop](#wiring-the-guard-into-the-tool-calling-loop)
-13. [A Quick Cost Model for When the Guard Pays for Itself](#a-quick-cost-model-for-when-the-guard-pays-for-itself)
+11. [Breaker Complements a Fixed Cap, It Doesn't Replace One](#breaker-complements-a-fixed-cap-it-doesnt-replace-one)
+12. [Installing and Wiring Breaker Into the Tool-Calling Loop](#installing-and-wiring-breaker-into-the-tool-calling-loop)
+13. [A Quick Cost Model for When Breaker Pays for Itself](#a-quick-cost-model-for-when-breaker-pays-for-itself)
 14. [Calibrating k, m, and the Thresholds](#calibrating-k-m-and-the-thresholds)
 15. [Worked Example](#worked-example)
 16. [Producing a Structured Stall Summary](#producing-a-structured-stall-summary)
@@ -60,7 +60,7 @@ Laying the three approaches side by side against the same paraphrased-retry exam
 
 The last column matters as much as the first two — a check that catches everything a loop guard should catch but also fires on every single retry, including the one legitimate retry that follows a normal, expected first failure, is not an improvement on a blunt iteration cap, just a differently-blunt one. The sustained-similarity condition developed later in this post exists specifically to keep the semantic check from over-firing on that normal case.
 
-## Designing a Session-Local Loop Guard
+## Designing Breaker: A Session-Local Loop Guard
 
 The guard I want sits directly in the tool-call loop: after every tool call completes, construct a compact signature of what the agent just attempted and what happened as a result, compare that signature against the last handful of signatures from the *same session*, and raise a signal when several consecutive actions are both similar to each other and failing to produce a meaningfully different outcome.
 
@@ -70,7 +70,7 @@ Two things distinguish this from a single retry, which is completely normal agen
 
 Every other Qdrant-backed design on this blog uses a persistent, growing collection: a corpus of known injection patterns, a cache of past query results, an incident registry that gets more useful the longer it accumulates history. This one is different by design, and it's worth being explicit about why, because the instinct to make everything a persistent, cross-session store is exactly wrong here.
 
-The loop guard's entire job is to answer one question — "is *this* session, right now, going in circles" — using only the last handful of actions from *that* session. It has no need for, and actively should not have, visibility into what happened in other sessions on other tasks: mixing in historical data from unrelated runs doesn't sharpen the detection of an in-progress loop, it dilutes the rolling window's signal with irrelevant neighbors and reintroduces exactly the kind of cross-session conflation the previous section argued against. Building a persistent library of past failures for future retrieval — so that a *new* session can recognize "this looks like a fix pattern that failed on a similar bug three weeks ago" — is a genuinely different and complementary problem, closer in spirit to the calibration loop described in [risk-gate](/posts/risk-gate-verifiability-library/) on this blog, which mines labeled outcomes across many steps and many runs into a classifier that improves over time. That's a *cross-session learning* problem. This is an *in-session, right-now* problem, and conflating the two designs would make both worse: the loop guard doesn't need to remember anything past this session's end, and a cross-session incident store shouldn't be repurposed to also gate a live tool-calling loop turn-by-turn.
+The loop guard's entire job is to answer one question — "is *this* session, right now, going in circles" — using only the last handful of actions from *that* session. It has no need for, and actively should not have, visibility into what happened in other sessions on other tasks: mixing in historical data from unrelated runs doesn't sharpen the detection of an in-progress loop, it dilutes the rolling window's signal with irrelevant neighbors and reintroduces exactly the kind of cross-session conflation the previous section argued against. Building a persistent library of past failures for future retrieval — so that a *new* session can recognize "this looks like a fix pattern that failed on a similar bug three weeks ago" — is a genuinely different and complementary problem, closer in spirit to the calibration loop described in [Verdict](/posts/verdict/) on this blog, which mines labeled outcomes across many steps and many runs into a classifier that improves over time. That's a *cross-session learning* problem. This is an *in-session, right-now* problem, and conflating the two designs would make both worse: the loop guard doesn't need to remember anything past this session's end, and a cross-session incident store shouldn't be repurposed to also gate a live tool-calling loop turn-by-turn.
 
 Practically, this means the collection backing the guard is created fresh at session start and discarded at session end — either a genuinely ephemeral named collection dropped on session close, or Qdrant's in-memory mode (`QdrantClient(location=":memory:")`) when the agent framework runs one session per process, which avoids any persistence step at all. Either way, the collection never needs to hold more than a handful of points at once, since only the last $k$ actions matter.
 
@@ -257,7 +257,7 @@ $$
 
 Requiring the outcome condition, not just the action condition, is what keeps a legitimately converging agent from tripping the guard: an agent making five different edits to the same function, each targeting a different sub-issue, can easily have a high $\bar{s}_a(t)$ (same file, same function, structurally similar diffs) while $\bar{s}_o(t)$ stays low, because the assertion failing, the error type, or the test outcome genuinely changes turn over turn. $L(t)$ only fires when *both* conditions hold, and $\text{fire}(t)$ only escalates that into an actual guard trigger once it's been true for $m$ consecutive turns rather than a single coincidental spike — a single retry after one failure, which is normal and expected, produces at most one loopy turn and never reaches $\text{fire}(t)=1$ unless the pattern actually persists.
 
-## What Happens When the Guard Fires: an Escalation Ladder
+## What Happens When Breaker Fires: an Escalation Ladder
 
 A firing guard should not default to a hard stop. Aborting a task at the first sign of repetition wastes legitimate near-convergent work as readily as it stops a genuine loop, and the whole point of scoping this to a sustained-similarity condition rather than a single retry was to avoid exactly that overcorrection. A graduated response, in increasing order of severity and cost:
 
@@ -309,17 +309,34 @@ ARTICULATION_PROMPT = (
 
 A session that has already been through `ARTICULATE_DIFFERENCE` once and fires again shortly after climbs straight to `SWITCH_STRATEGY` rather than asking the agent to articulate a difference for a second time — an agent that failed to produce a real answer the first time is unlikely to produce one on request a second time, and repeating the same escalation step is itself a small loop worth avoiding.
 
-## The Guard Complements a Fixed Cap, It Doesn't Replace One
+## Breaker Complements a Fixed Cap, It Doesn't Replace One
 
 Everything above argues that a fixed iteration or recursion cap is a poor *primary* loop detector — it's blunt, and it fires only after the fact, at a count chosen without any reference to whether the session is actually stuck. None of that is an argument for removing the cap. A fixed ceiling is what catches the guard's own failure modes: an embedding service outage that silently degrades `embed_fn` to returning constant or near-random vectors, a misconfigured threshold that never fires, a session whose behavior doesn't resemble any of the patterns this design anticipates. The LangGraph issue cited earlier makes the layering explicit without necessarily framing it this way: `recursion_limit` was already "the last line of defense" once the old identical-tool-call heuristic was removed, and `ToolCallLimitMiddleware`'s count-based ceiling is a reasonable *second* line, not a replacement for a semantic check — it's simply the layer that's cheap to implement and independent of any embedding infrastructure, which is exactly the property you want in a backstop.
 
 The practical arrangement, then, is two layers: the semantic guard in this post as the primary, fast-acting detector that catches most loops well before they'd exhaust a generously-sized cap, and a fixed recursion or iteration limit set generously enough to rarely bind in practice, existing purely to bound worst-case cost when the primary layer fails silently for any reason. Neither layer alone is sufficient — the fixed cap alone reproduces the too-late/too-early problem this post opened with, and the semantic guard alone has no protection against its own infrastructure failing quietly.
 
-## Wiring the Guard Into the Tool-Calling Loop
+## Installing and Wiring Breaker Into the Tool-Calling Loop
 
-The guard is only useful if something actually calls it after every tool invocation and acts on the result — a design that lives in a document but not in the agent's actual control flow prevents nothing. A minimal integration around a generic tool-calling loop:
+Breaker ships as a single pip-installable package built around `SessionLoopGuard` and the escalation ladder:
+
+```bash
+pip install breaker-agents
+```
+
+```
+breaker/
+├── signature.py     # action-outcome signature construction
+├── store.py           # ephemeral, session-scoped Qdrant collection
+├── guard.py             # SessionLoopGuard, record_and_check()
+└── escalation.py           # EscalationLevel, next_escalation(), ARTICULATION_PROMPT
+```
+
+Breaker is only useful if something actually calls it after every tool invocation and acts on the result — a design that lives in a document but not in the agent's actual control flow prevents nothing. A minimal integration around a generic tool-calling loop:
 
 ```python
+from breaker.guard import SessionLoopGuard
+from breaker.escalation import EscalationLevel, next_escalation, ARTICULATION_PROMPT
+
 def run_agent_session(agent, task, tools, embed_fn, session_id: str):
     guard = SessionLoopGuard(session_id=session_id, embed_fn=embed_fn)
     escalations_this_session = 0
@@ -358,7 +375,7 @@ def run_agent_session(agent, task, tools, embed_fn, session_id: str):
 
 The escalation counter resets naturally at the top of the ladder only when the guard stops firing — a session that breaks out of its loop after a forced articulation simply never triggers `next_escalation` again above `NONE`, and `escalations_this_session` never needs to be decremented, since the point of the ladder is to make each subsequent intervention within one stuck episode progressively stronger, not to forgive past escalations mid-session.
 
-## A Quick Cost Model for When the Guard Pays for Itself
+## A Quick Cost Model for When Breaker Pays for Itself
 
 The guard itself isn't free — an embedding call and a couple of small Qdrant queries on every tool call adds latency and a marginal compute cost to every single turn, whether or not a loop is ever detected. Whether that overhead is worth paying comes down to a simple comparison: the guard's per-turn cost against the expected savings from catching loops earlier than a fixed iteration cap would.
 
@@ -497,5 +514,5 @@ Finally, the added latency from an embedding call plus two Qdrant queries on eve
 - LangGraph GitHub Issue #6731. *Agent infinite looping until recursion limit error is hit.* [github.com/langchain-ai/langgraph/issues/6731](https://github.com/langchain-ai/langgraph/issues/6731)
 - LangGraph Documentation. *Recursion limit and `GraphRecursionError`.* [docs.langchain.com/oss/python/langgraph/graph-api](https://docs.langchain.com/oss/python/langgraph/graph-api)
 - Anthropic (2024). *Building Effective Agents.* [anthropic.com/engineering/building-effective-agents](https://www.anthropic.com/engineering/building-effective-agents)
-- This blog's companion post on session-level architecture for agentic loops: [risk-gate: A Working Risk Classifier for Agentic Software Factories](/posts/risk-gate-verifiability-library/)
+- This blog's companion post on session-level architecture for agentic loops: [Verdict: A Working Risk Classifier for Agentic Software Factories](/posts/verdict/)
 - Qdrant. *Qdrant Vector Database Documentation.* [qdrant.tech/documentation](https://qdrant.tech/documentation)

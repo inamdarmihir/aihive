@@ -1,7 +1,7 @@
 ---
-title: "Taming Multi-Bot PR Review Fatigue: Deduplicating AI Code Review Comments"
+title: "Concord: A Consolidation Gateway for Multi-Bot PR Review Fatigue"
 date: 2026-07-24
-description: "Running four AI code review bots on the same pull request means the same real bug gets flagged three different ways in three different comments, while each bot's own distinct false positives pile on top. This post designs a review-consolidation gateway that buffers incoming bot comments, matches them by a combination of code-location proximity and semantic similarity — not text similarity alone — and collapses true duplicates deterministically, using Qdrant as the per-PR similarity index rather than another LLM call."
+description: "Running four AI code review bots on the same pull request means the same real bug gets flagged three different ways in three different comments, while each bot's own distinct false positives pile on top. Concord is a review-consolidation gateway — a GitHub App you install alongside your existing bots (CodeRabbit, Cursor Bugbot, Copilot, Devin Reviewer) — that buffers incoming bot comments, matches them by a combination of code-location proximity and semantic similarity, and collapses true duplicates deterministically, using Qdrant as the per-PR similarity index rather than another LLM call."
 tags: ["agents", "code-review", "github", "developer-productivity", "qdrant"]
 author: "Mihir Inamdar"
 showToc: true
@@ -10,23 +10,24 @@ math: true
 
 Running one AI code review bot on a pull request was, for a while, a clear productivity win — a tireless first pass that caught the obvious stuff before a human spent any attention on it. Running two to four of them at once, which is now the normal configuration on teams using **GitHub Copilot**'s PR review, **CodeRabbit**, **Cursor Bugbot**, **Devin Reviewer**, and **Graphite**'s reviewer in various combinations, produces a different and worse outcome than "four times the coverage." Each bot reads the same diff independently and posts its own comments, and the empirical pattern documented across multiple teams running this setup is consistent: false positives rarely overlap between bots, but true positives mostly do. A genuinely correct finding gets posted three or four times in slightly different wording, while each bot also contributes its own distinct noise on top. A developer opening the PR sees ten to fifteen comments, has to manually work out which are duplicates, which are real, and which are noise — which is close to the exact triage burden AI review was supposed to remove.
 
-This post designs a consolidation layer that sits between the bots and the developer: a gateway that buffers incoming review comments for a short window, matches genuine duplicates using a combination of code-location proximity and semantic text similarity, and collapses them before anything reaches a human. It covers the matching design, the Qdrant-backed filtered-then-ranked query at the center of it, and the threshold tradeoffs involved in getting the aggressiveness of the merge right. It does not cover the review bots' own detection logic, prompt engineering for better first-pass findings, or CI/static-analysis integration — those are separate, already well-covered concerns. Familiarity with GitHub's Apps/webhooks model (`pull_request_review_comment` events specifically) is assumed. The matching problem here is a close cousin of the one covered in the [companion post on duplicate GitHub issue detection](/posts/qdrant-duplicate-issue-triage/) — both use a hybrid of exact-field filtering and semantic similarity rather than either alone — but the constraint that makes this problem distinct is the hard requirement that two comments in different code locations must never merge regardless of textual similarity, which the issue-dedup design doesn't need to enforce in the same way.
+This post designs and specs **Concord**, a consolidation layer that sits between the bots and the developer: a GitHub App that buffers incoming review comments for a short window, matches genuine duplicates using a combination of code-location proximity and semantic text similarity, and collapses them before anything reaches a human — installed alongside whatever review bots your team already runs, with no changes required to those bots themselves. It covers the matching design, the Qdrant-backed filtered-then-ranked query at the center of it, and the threshold tradeoffs involved in getting the aggressiveness of the merge right. It does not cover the review bots' own detection logic, prompt engineering for better first-pass findings, or CI/static-analysis integration — those are separate, already well-covered concerns. Familiarity with GitHub's Apps/webhooks model (`pull_request_review_comment` events specifically) is assumed. The matching problem here is a close cousin of the one covered in the [companion post on duplicate GitHub issue detection](/posts/qdrant-duplicate-issue-triage/) — both use a hybrid of exact-field filtering and semantic similarity rather than either alone — but the constraint that makes this problem distinct is the hard requirement that two comments in different code locations must never merge regardless of textual similarity, which the issue-dedup design doesn't need to enforce in the same way.
 
 ## Table of Contents
 
 1. [The Shape of the Problem: Redundant Signal, Independent Noise](#the-shape-of-the-problem-redundant-signal-independent-noise)
 2. [Why Naive Deduplication Fails](#why-naive-deduplication-fails)
 3. [Prior Art: Distill and Quorum](#prior-art-distill-and-quorum)
-4. [Design: A Review-Consolidation Gateway](#design-a-review-consolidation-gateway)
+4. [Design: Concord's Review-Consolidation Gateway](#design-concords-review-consolidation-gateway)
    - [Buffering Incoming Comments](#buffering-incoming-comments)
    - [The Qdrant Schema](#the-qdrant-schema)
    - [The Filtered-Then-Ranked Query](#the-filtered-then-ranked-query)
    - [Consolidation Logic](#consolidation-logic)
 5. [Threshold Tuning: The Conservative Bias](#threshold-tuning-the-conservative-bias)
-6. [Worked Example: Four Bots, One Line](#worked-example-four-bots-one-line)
-7. [Deterministic Consensus, Not Another LLM Call](#deterministic-consensus-not-another-llm-call)
-8. [Challenges and Open Problems](#challenges-and-open-problems)
-9. [References](#references)
+6. [Installing Concord](#installing-concord)
+7. [Worked Example: Four Bots, One Line](#worked-example-four-bots-one-line)
+8. [Deterministic Consensus, Not Another LLM Call](#deterministic-consensus-not-another-llm-call)
+9. [Challenges and Open Problems](#challenges-and-open-problems)
+10. [References](#references)
 
 ## The Shape of the Problem: Redundant Signal, Independent Noise
 
@@ -77,9 +78,9 @@ The overlap on "consensus should be computed deterministically, not delegated to
 
 It's also worth being clear that a consolidation layer is a complement to a handful of already-documented mitigation habits, not a replacement for them. Teams dealing with this problem also scope individual bots down — narrower path filters so a bot only comments on the parts of the codebase it's actually reliable on, and higher severity thresholds so it stays quiet on the borderline cases most likely to be dismissed. Smaller, more atomic pull requests help independently, since large monolithic diffs are exactly the condition under which review bots (like human reviewers) tend to produce more generic, less anchored feedback — a bot skimming a 2,000-line diff hallucinates and over-generalizes more than the same bot given a focused 80-line change. And the most durable habit is cultural rather than technical: treating every bot comment, consolidated or not, as a hypothesis a human still has to verify, not a fact to act on unquestioned — a consolidation layer that successfully merges four instances of the same wrong claim into one comment has not made the claim any more true, only quieter.
 
-## Design: A Review-Consolidation Gateway
+## Design: Concord's Review-Consolidation Gateway
 
-The gateway is a GitHub App installed alongside the review bots, subscribed to `pull_request_review_comment` and review-submission webhook events from each one. Rather than letting each bot's comments post directly and visibly the moment they're created, the gateway intercepts them, holds them in a short buffer, and only then decides what actually gets shown.
+**Concord** is a GitHub App installed alongside the review bots, subscribed to `pull_request_review_comment` and review-submission webhook events from each one. Rather than letting each bot's comments post directly and visibly the moment they're created, Concord intercepts them, holds them in a short buffer, and only then decides what actually gets shown.
 
 ### Buffering Incoming Comments
 
@@ -382,6 +383,33 @@ Given that asymmetry — a false merge hides a real bug, a false non-merge just 
 
 Neither number should be picked from a table alone and shipped. The more reliable path is running the matching logic in shadow mode — logging what clusters it *would* form without actually minimizing anything or posting a consolidated comment — against a sample of already-closed PRs that had active multi-bot review, then having a human spot-check whether those clusters look right. A few dozen historical PRs are usually enough to reveal whether the 0.87 default is producing too many false merges or too many missed duplicates for a given repo's specific bot mix and codebase vocabulary, before the gateway is trusted to act on its own judgment against live PRs.
 
+## Installing Concord
+
+Concord installs as a standard GitHub App, and its scoring internals ship as a separate pip-installable package for teams that want to run the matching logic themselves (self-hosted webhook receiver, custom posting logic) rather than use the hosted App directly:
+
+```bash
+pip install concord-review
+```
+
+```python
+from concord.buffer import handle_incoming_comment, BufferedComment
+from concord.matching import find_duplicates
+from concord.store import CommentIndex
+
+index = CommentIndex(url="https://your-cluster.qdrant.io", api_key="...")
+
+await handle_incoming_comment(BufferedComment(
+    pr_id="org/repo#4821",
+    bot_name="cursor-bugbot",
+    file_path="auth/session.ts",
+    line_start=87, line_end=89,
+    raw_text="Potential NPE: `user` is not null-checked before use here.",
+    has_suggestion=False,
+))
+```
+
+No changes are required to CodeRabbit, Cursor Bugbot, Copilot, or Devin Reviewer's own configuration — Concord subscribes to the same `pull_request_review_comment` webhook events GitHub already delivers for each of them and only changes what a developer sees after the buffer window closes.
+
 ## Worked Example: Four Bots, One Line
 
 A concrete pass through the pipeline, with four bots returning findings on the same PR within the buffer window.
@@ -418,7 +446,7 @@ The true-positive contribution collapses from 6 expected comments down to essent
 
 ## Deterministic Consensus, Not Another LLM Call
 
-Every step in the pipeline above — the location filter, the similarity threshold comparison, the representative-selection tie-break — is plain code operating on numbers Qdrant returned, not a prompt asking a model "are comments A and B the same finding?" This mirrors Quorum's explicit design choice, stated directly in its own documentation, that "quorum is computed in code from distinct reviewers, not by the model," and it's worth treating as a hard constraint on this design rather than an implementation detail.
+Every step in Concord's pipeline above — the location filter, the similarity threshold comparison, the representative-selection tie-break — is plain code operating on numbers Qdrant returned, not a prompt asking a model "are comments A and B the same finding?" This mirrors Quorum's explicit design choice, stated directly in its own documentation, that "quorum is computed in code from distinct reviewers, not by the model," and it's worth treating as a hard constraint on this design rather than an implementation detail.
 
 The reasoning is the same one that shows up whenever a system is built specifically to reduce noise or hallucination: the consolidation layer itself must not become a new source of exactly the problem it exists to solve. An LLM asked to judge semantic equivalence between two review comments will sometimes get it wrong in ways that are neither predictable nor reproducible — the same pair of comments might get merged on one call and kept separate on a re-run with a different sampling seed, which makes the system's behavior impossible to reason about or debug when a developer asks "why did these two get merged?" A cosine similarity score against a location-filtered candidate set is deterministic: the same two comments, the same embeddings, the same threshold, always produce the same verdict, and the verdict is directly inspectable — the similarity number and the location distance are both concrete values a developer or an on-call engineer can look at and understand, not a model's unexplained judgment call. The embedding step itself does involve a model, but its output feeds a deterministic downstream comparison rather than being asked to render the merge decision directly, which keeps the one genuinely model-dependent part of the pipeline contained to a step whose failure mode (a slightly worse embedding) degrades gracefully into a slightly worse similarity score, rather than an outright wrong yes/no verdict.
 

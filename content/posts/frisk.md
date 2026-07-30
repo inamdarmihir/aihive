@@ -1,7 +1,7 @@
 ---
-title: "Scanning Shared Agent Skill Files for Injected Instructions Before You Fork Them"
+title: "Frisk: A Pre-Fork Scanner for Injected Instructions in Agent Skill Files"
 date: 2026-07-14
-description: "Agent Skills — shareable markdown/YAML files that coding agents load and follow as instructions — get forked and translated across repositories with no review pipeline, yet unlike a .py file they are executed, not read. This post covers the injection half of that risk: a scanner that checks a candidate skill file against a corpus of known-suspicious instruction patterns, applies structural heuristics independent of any specific pattern, and tracks provenance across forks with a Qdrant-backed lineage registry."
+description: "Agent Skills — shareable markdown/YAML files that coding agents load and follow as instructions — get forked and translated across repositories with no review pipeline, yet unlike a .py file they are executed, not read. Frisk is a pip-installable scanner you drop into a CI check or marketplace ingestion pipeline: it checks a candidate skill file against a corpus of known-suspicious instruction patterns, applies structural heuristics independent of any specific pattern, and tracks provenance across forks with a Qdrant-backed lineage registry."
 tags: ["agents", "security", "prompt-injection", "supply-chain", "qdrant"]
 author: "Mihir Inamdar"
 showToc: true
@@ -10,7 +10,7 @@ math: true
 
 **Agent Skills** — markdown and YAML files that Claude Code and similar coding-agent frameworks load at the start of a session and follow as instructions for how to approach a class of task — are a genuinely new artifact type in the 2026 agent ecosystem, and the ecosystem has not caught up to what that means. A skill file looks like documentation: prose, headers, the occasional code block. It is not read by a human and then acted on; it is read by an agent and *executed*, in the sense that its imperative sentences become the agent's next actions. That distinction is the entire subject of this post.
 
-I'm scoping this narrowly to one risk: a shared skill file carrying a deliberately or accidentally injected instruction that does something its stated purpose doesn't call for. A related but distinct risk — a skill file referencing a hallucinated, non-existent package name that an agent then dutifully tries to install — is covered by a companion piece on this blog focused on slopsquatting defense specifically; I reference the incident that motivates both posts below, but this post's job is the injection half, not the phantom-dependency half. Required background: Simon Willison's lethal-trifecta framing for why untrusted content is exploitable by agents at all, and a general familiarity with how Claude Code-style Agent Skills are structured (a `SKILL.md` file plus optional supporting scripts, loaded into context as instructions rather than retrieved as reference material).
+I'm scoping this narrowly to one risk: a shared skill file carrying a deliberately or accidentally injected instruction that does something its stated purpose doesn't call for. This post is also the spec for **Frisk**, a small library that pats down a candidate skill file before it gets forked or merged — a single function call a CI check or a skill marketplace's ingestion pipeline can run against every incoming file. A related but distinct risk — a skill file referencing a hallucinated, non-existent package name that an agent then dutifully tries to install — is covered by a companion piece on this blog focused on slopsquatting defense specifically; I reference the incident that motivates both posts below, but this post's job is the injection half, not the phantom-dependency half. Required background: Simon Willison's lethal-trifecta framing for why untrusted content is exploitable by agents at all, and a general familiarity with how Claude Code-style Agent Skills are structured (a `SKILL.md` file plus optional supporting scripts, loaded into context as instructions rather than retrieved as reference material).
 
 ## Table of Contents
 
@@ -18,19 +18,20 @@ I'm scoping this narrowly to one risk: a shared skill file carrying a deliberate
 2. [The react-codeshift Incident](#the-react-codeshift-incident)
 3. [From Hallucination to Injection: the Same Propagation Mechanism](#from-hallucination-to-injection-the-same-propagation-mechanism)
 4. [The Lethal Trifecta, Applied to a Forked Skill File](#the-lethal-trifecta-applied-to-a-forked-skill-file)
-5. [Designing a Skill-File Scanner](#designing-a-skill-file-scanner)
+5. [Designing Frisk](#designing-frisk)
 6. [Why Keyword Blocklists Fail Here Too](#why-keyword-blocklists-fail-here-too)
 7. [Component One: A Corpus of Known-Suspicious Instruction Fragments](#component-one-a-corpus-of-known-suspicious-instruction-fragments)
 8. [Component Two: Chunking and Scanning a Candidate Skill File](#component-two-chunking-and-scanning-a-candidate-skill-file)
 9. [Component Three: Structural Red Flags Independent of Pattern Match](#component-three-structural-red-flags-independent-of-pattern-match)
 10. [Component Four: Provenance and Lineage Tracking](#component-four-provenance-and-lineage-tracking)
 11. [Putting the Pieces Together](#putting-the-pieces-together)
-12. [Aggregating Findings Into a Routing Decision](#aggregating-findings-into-a-routing-decision)
-13. [Where the Scanner Sits: a Pre-Fork Check, Not a Runtime Guardrail](#where-the-scanner-sits-a-pre-fork-check-not-a-runtime-guardrail)
-14. [Growing the Corpus Without Drifting Into Noise](#growing-the-corpus-without-drifting-into-noise)
-15. [Worked Example](#worked-example)
-16. [Challenges and Open Problems](#challenges-and-open-problems)
-17. [References](#references)
+12. [Installing and Using Frisk](#installing-and-using-frisk)
+13. [Aggregating Findings Into a Routing Decision](#aggregating-findings-into-a-routing-decision)
+14. [Where the Scanner Sits: a Pre-Fork Check, Not a Runtime Guardrail](#where-the-scanner-sits-a-pre-fork-check-not-a-runtime-guardrail)
+15. [Growing the Corpus Without Drifting Into Noise](#growing-the-corpus-without-drifting-into-noise)
+16. [Worked Example](#worked-example)
+17. [Challenges and Open Problems](#challenges-and-open-problems)
+18. [References](#references)
 
 ## Agent Skills Are Executable, Not Documentary
 
@@ -75,7 +76,7 @@ Simon Willison's **lethal trifecta** framing (Willison, 2025) names three capabi
 
 A skill file is untrusted content the instant it originates from anyone other than the agent's own operator — regardless of how legitimate the fork chain looks. A well-starred repository, a plausible README, dozens of prior forks with no reported incidents: none of that is evidence about the actual content of the `SKILL.md` file at the point it's loaded, because none of those signals require anyone to have read the file's instructions carefully. The react-codeshift incident is direct evidence of exactly this: 237+ repositories forked skill files whose content none of the forking developers had independently verified, and the content happened to be wrong in a way that was merely embarrassing (a package that fails to install) rather than damaging (a package, or an instruction, that succeeds and does something harmful). The lethal trifecta doesn't require the untrusted content to come from a web page or a tool response — a skill file loaded directly into context at session start satisfies the "untrusted content" leg just as completely, and arguably more insidiously, because the agent's operator chose to load it, which creates a false sense that it has been vetted.
 
-## Designing a Skill-File Scanner
+## Designing Frisk
 
 The goal is a pre-fork, pre-install check: before a skill file is added to an agent's available skills, scan its full content — not just embedded code blocks, since an injected instruction is just as likely to be phrased as ordinary prose in a numbered step as it is to appear inside a shell snippet — for two independent classes of signal.
 
@@ -411,6 +412,40 @@ def evaluate_new_skill(path: str, corpus: SkillCorpus, scanner: SkillFileScanner
 ```
 
 `evaluate_new_skill` is the single entry point a CI check or a marketplace ingestion pipeline would actually call; everything upstream of it — chunking, pattern matching, structural checks, lineage lookup, risk aggregation — happens inside `scan_and_route` and stays invisible to whatever caller just wants a routing decision and a list of findings to show a human.
+
+## Installing and Using Frisk
+
+Frisk ships as a single pip-installable package, with the pipeline above collapsing into the four-module layout it was already designed around:
+
+```bash
+pip install frisk-skills
+```
+
+```
+frisk/
+├── corpus.py       # SkillCorpus: known-suspicious instruction fragments
+├── scanner.py        # SkillFileScanner: chunk + pattern-match + structural checks
+├── provenance.py       # SkillProvenanceRegistry: fork lineage tracking
+└── pipeline.py           # evaluate_new_skill(), the single entry point
+```
+
+Wiring Frisk into a GitHub Action that runs on every incoming skill-file PR:
+
+```python
+from frisk.pipeline import build_pipeline, evaluate_new_skill
+
+corpus, scanner, registry = build_pipeline(
+    qdrant_url="https://your-cluster.qdrant.io", embed_fn=your_embed_fn,
+)
+
+result = evaluate_new_skill("SKILL.md", corpus, scanner, registry)
+if result["routing"] == "auto_reject":
+    sys.exit(1)
+elif result["routing"] == "human_review":
+    post_pr_comment(format_findings(result["findings"]))
+```
+
+A skill marketplace's own ingestion pipeline calls the same `evaluate_new_skill` function at upload time rather than at fork time — Frisk doesn't care which event triggers the scan, only that it runs before the file is trusted to run as instructions anywhere downstream.
 
 ## Aggregating Findings Into a Routing Decision
 
