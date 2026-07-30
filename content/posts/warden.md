@@ -1,7 +1,7 @@
 ---
-title: "Slopsquatting: A Pre-Install Gate for Autonomous Coding Agents"
+title: "Warden: A Pre-Install Gate for Autonomous Coding Agents"
 date: 2026-07-26
-description: "LLMs have hallucinated package names for years, but the execution model just changed: an autonomous coding agent now runs pip install and npm install itself, with no human eyeballing the name first. This post designs a layered pre-install gate for that new reality, where a plain registry-existence check is necessary but not sufficient, and Qdrant does two structurally different jobs — catching typosquats an attacker got to first, and proactively predicting which conflation-style names your own agents are likely to invent next."
+description: "LLMs have hallucinated package names for years, but the execution model just changed: an autonomous coding agent now runs pip install and npm install itself, with no human eyeballing the name first. Warden is a layered pre-install gate for that new reality — a pip-installable hook that plugs into Claude Code, Cursor, and Copilot's tool-execution loop — where a plain registry-existence check is necessary but not sufficient, and Qdrant does two structurally different jobs: catching typosquats an attacker got to first, and proactively predicting which conflation-style names your own agents are likely to invent next."
 tags: ["agents", "security", "supply-chain", "coding-agents", "qdrant"]
 author: "Mihir Inamdar"
 showToc: true
@@ -10,7 +10,7 @@ math: true
 
 Code-generating LLMs have invented package names that don't exist since the first models were fine-tuned on code. That fact alone was never the interesting part — a hallucinated import in a ChatGPT response sitting in a browser tab is inert until a human copies it into a terminal. What changed in the last cycle of agent tooling is the step that used to sit between hallucination and execution: Claude Code, Cursor's agent mode, OpenAI Codex, and GitHub Copilot's workspace agents now run `pip install` and `npm install` themselves, inside an auto-accept or bypass-permissions loop, as a routine part of finishing a task. The eyeball check that used to catch an obviously-wrong package name before anything happened is gone, not because the underlying hallucination rate got worse, but because the human is no longer in the loop at the exact moment it matters.
 
-This post is about defending that specific moment — the interval between an agent deciding to install a package and the shell actually running the command. I cover why checking whether a proposed package name exists in the registry is a necessary first move but has a real structural blind spot, a layered pre-install gate that closes it, and where a vector database earns its place in that pipeline as one signal among several rather than the whole design. It does not cover post-install runtime sandboxing, supply-chain attacks that don't involve a hallucinated name (typosquats a human fat-fingered, or compromised maintainer accounts), or SBOM generation — those are different, well-covered problems. Familiarity with how agent frameworks expose pre-tool-use hooks (Claude Code's `PreToolUse`, in particular) is assumed but not required to follow the design.
+This post is about defending that specific moment — the interval between an agent deciding to install a package and the shell actually running the command. It's also the implementation spec for **Warden**, a small pip-installable library that closes that moment: a `PreToolUse`-style hook you register directly with an existing agent framework (Claude Code, GitHub Copilot's workspace agents, or any harness that exposes a pre-tool-call interception point), backed by a layered check pipeline and a Qdrant-held trusted corpus. I cover why checking whether a proposed package name exists in the registry is a necessary first move but has a real structural blind spot, the four-layer design that closes it, and where Qdrant earns its place in that pipeline as one signal among several rather than the whole design. It does not cover post-install runtime sandboxing, supply-chain attacks that don't involve a hallucinated name (typosquats a human fat-fingered, or compromised maintainer accounts), or SBOM generation — those are different, well-covered problems. Familiarity with how agent frameworks expose pre-tool-use hooks (Claude Code's `PreToolUse`, in particular) is assumed but not required to follow the design.
 
 ## Table of Contents
 
@@ -19,16 +19,17 @@ This post is about defending that specific moment — the interval between an ag
 3. [Why Existence Checking Alone Fails: A Race-Condition Argument](#why-existence-checking-alone-fails-a-race-condition-argument)
 4. [The react-codeshift Incident](#the-react-codeshift-incident)
 5. [Prior Art: Registry Scanners and the Agentinel Pattern](#prior-art-registry-scanners-and-the-agentinel-pattern)
-6. [Design: A Layered Pre-Install Gate](#design-a-layered-pre-install-gate)
+6. [Design: Warden's Layered Pre-Install Gate](#design-wardens-layered-pre-install-gate)
    - [Layer 1: Registry Existence](#layer-1-registry-existence)
    - [Layer 2: Trusted-Corpus Near-Miss Detection](#layer-2-trusted-corpus-near-miss-detection)
    - [Layer 3: Proactive Conflation-Risk Prediction](#layer-3-proactive-conflation-risk-prediction)
    - [Layer 4: Metadata Heuristics](#layer-4-metadata-heuristics)
    - [Structured Feedback Into the Agent's Context](#structured-feedback-into-the-agents-context)
-7. [Worked Example: react-codeshift Through the Pipeline](#worked-example-react-codeshift-through-the-pipeline)
-8. [Mapping to the Five Eyes Agentic AI Advisory](#mapping-to-the-five-eyes-agentic-ai-advisory)
-9. [Challenges and Open Problems](#challenges-and-open-problems)
-10. [References](#references)
+7. [Installing and Using Warden](#installing-and-using-warden)
+8. [Worked Example: react-codeshift Through the Pipeline](#worked-example-react-codeshift-through-the-pipeline)
+9. [Mapping to the Five Eyes Agentic AI Advisory](#mapping-to-the-five-eyes-agentic-ai-advisory)
+10. [Challenges and Open Problems](#challenges-and-open-problems)
+11. [References](#references)
 
 ## The Term, and Why the Threat Model Just Changed
 
@@ -103,9 +104,9 @@ The detail worth borrowing wholesale, independent of Agentinel's specific detect
 
 This matters because the audience for the rejection is not primarily a human — it's the agent itself, mid-task. A plain shell error ("command failed, exit code 1") gives a coding agent almost nothing to work with; a structured verdict that says *why* lets the agent reason "I hallucinated a package name, let me search for the real one" and self-correct within the same turn, instead of blindly retrying the identical install or surfacing a dead end to the user. Any pre-install gate built for an agent, not a human reviewer, should return feedback in this shape. The pipeline below does.
 
-## Design: A Layered Pre-Install Gate
+## Design: Warden's Layered Pre-Install Gate
 
-The gate sits as a `PreToolUse`-style hook matched against `Bash` tool calls, inspecting the command before it reaches the shell. It runs four checks in increasing order of cost and decreasing order of certainty, short-circuiting as soon as one produces a definitive verdict.
+**Warden** sits as a `PreToolUse`-style hook matched against `Bash` tool calls, inspecting the command before it reaches the shell. It runs four checks in increasing order of cost and decreasing order of certainty, short-circuiting as soon as one produces a definitive verdict.
 
 ```
 proposed install command
@@ -450,6 +451,53 @@ The `block` case gives the agent exactly what it needs to self-correct within th
 
 This is small enough to be a non-issue for a single install, but an agent that's resolving a dozen transitive dependencies in one task can accumulate a few seconds of added latency — acceptable for the security tradeoff, but worth caching Layer 1's registry lookups within a session (the same name is often checked multiple times as an agent iterates) rather than re-fetching on every retry.
 
+## Installing and Using Warden
+
+Warden ships as a single pip-installable package with no required external service beyond a Qdrant instance for Layers 2 and 3 (Layer 1 and Layer 4 run against public registries directly, and work with Warden's install-time defaults even without Qdrant configured):
+
+```bash
+pip install warden-agents
+# or, with a local FastEmbed model instead of an external embedding API:
+pip install "warden-agents[fastembed]"
+```
+
+The package is four modules, each corresponding to a section above:
+
+```
+warden/
+├── registry.py     # Layer 1: check_registry_existence
+├── corpus.py        # Layer 2: TrustedCorpus, check_near_miss, backfill_from_lockfiles
+├── conflation.py     # Layer 3: find_adjacent_pairs, generate_conflation_candidates, watchlist
+├── heuristics.py     # Layer 4: metadata heuristics (age, downloads, publisher history)
+└── hook.py           # evaluate_install(), wired to your framework's PreToolUse equivalent
+```
+
+Wiring Warden into Claude Code is a one-line hook registration in `settings.json`, pointing at the same `evaluate_install` function shown earlier in this post:
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [{"type": "command", "command": "python -m warden.hook"}]
+      }
+    ]
+  }
+}
+```
+
+```python
+from warden.hook import evaluate_install
+from warden.corpus import TrustedCorpus
+
+corpus = TrustedCorpus(url="https://your-cluster.qdrant.io", api_key="...")
+verdict = evaluate_install(corpus, name="react-codeshift", ecosystem="npm")
+# {"verdict": "hold", "reason": "...", "suggestion": "..."}
+```
+
+For a framework without a native pre-tool-use hook, the same `evaluate_install` call wraps directly around any function your agent loop already uses to shell out — a `subprocess.run` wrapper, a LangChain `ShellTool`, or a custom tool-calling middleware — since Warden's public interface is a plain function call, not a framework-specific plugin API.
+
 ## Worked Example: react-codeshift Through the Pipeline
 
 Walking `react-codeshift` through this pipeline at two different points in time makes the layering concrete.
@@ -478,7 +526,7 @@ The advisory's "restrict to a pre-approved registry" recommendation, read litera
 
 ## Challenges and Open Problems
 
-**The trusted corpus has a real cold-start problem.** A genuinely new, legitimate package — something published last week that nobody's lockfile has ever referenced and that isn't yet in the top-N snapshot for its ecosystem — has no reason to sit close to anything in the corpus, so it neither trips the near-miss detector nor benefits from it. It sails through as a clean install, correctly, but the corpus provides zero signal about it either way. This is a genuine trust vacuum, not something the current design papers over.
+**Warden's trusted corpus has a real cold-start problem.** A genuinely new, legitimate package — something published last week that nobody's lockfile has ever referenced and that isn't yet in the top-N snapshot for its ecosystem — has no reason to sit close to anything in the corpus, so it neither trips the near-miss detector nor benefits from it. It sails through as a clean install, correctly, but the corpus provides zero signal about it either way. This is a genuine trust vacuum, not something the current design papers over.
 
 **Conflation prediction is a heuristic that only catches adjacent-pair hallucinations.** Layer 3 depends on the LLM's hallucination itself being a conflation of two things close together in the trusted corpus's own embedding space. The roughly 51% of hallucinations that are purely fabricated rather than conflated (per the CSA research note's classification) have no adjacent-pair structure to predict from — Layer 3 has nothing to say about them, and they fall entirely to Layer 1's existence check plus whatever an attacker hasn't yet claimed.
 

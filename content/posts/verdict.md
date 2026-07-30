@@ -1,24 +1,24 @@
 ---
-title: "risk-gate: A Working Risk Classifier for Agentic Software Factories"
+title: "Verdict: A Working Risk Classifier for Agentic Software Factories"
 date: 2026-07-08
-description: "This post is the design spec for risk-gate, a small library for agentic coding loops that scores every proposed step for verifiability before it runs, routes unverifiable or high-fan-out work to human escalation instead of grinding blind against a stop condition that can't see what matters, and calibrates its own thresholds against a Qdrant-backed history of past outcomes."
+description: "This post is the design spec for Verdict, a small library for agentic coding loops that scores every proposed step for verifiability before it runs, routes unverifiable or high-fan-out work to human escalation instead of grinding blind against a stop condition that can't see what matters, and calibrates its own thresholds against a Qdrant-backed history of past outcomes."
 tags: ["agents", "verifiability", "human-in-the-loop", "software-engineering", "qdrant"]
 author: "Mihir Inamdar"
 showToc: true
 math: true
 ---
 
-Coding agents can now run for hours without a human reading a line of what they produce. This post is the design spec for **risk-gate**, a small library I'm building that gives an agentic coding loop a structural way to recognize when its own stop condition cannot measure what actually matters for a step — and to route that step to a human instead of grinding forward on a passing-but-blind signal.
+Coding agents can now run for hours without a human reading a line of what they produce. This post is the design spec for **Verdict**, a small library I'm building that gives an agentic coding loop a structural way to recognize when its own stop condition cannot measure what actually matters for a step — and to route that step to a human instead of grinding forward on a passing-but-blind signal.
 
-I want to narrow the scope precisely, because the temptation with a post like this is to write an architecture essay with illustrative snippets. That is not the goal here. The goal is a library specification precise enough that the code shown could become a real repository: module boundaries, function and class signatures, a stated dependency footprint, an installation story. This post does not cover model training, RLHF, or benchmark design in depth — those appear only insofar as they explain *why* the verifiability gap exists. It covers the five-component design of `risk-gate` itself: a risk classifier, bounded execution under a verifier contract, an escalation subgraph, checkpoint commits as blast-radius boundaries, and a Qdrant-backed calibration loop.
+I want to narrow the scope precisely, because the temptation with a post like this is to write an architecture essay with illustrative snippets. That is not the goal here. The goal is a library specification precise enough that the code shown could become a real repository: module boundaries, function and class signatures, a stated dependency footprint, an installation story. This post does not cover model training, RLHF, or benchmark design in depth — those appear only insofar as they explain *why* the verifiability gap exists. It covers the five-component design of `verdict` itself: a risk classifier, bounded execution under a verifier contract, an escalation subgraph, checkpoint commits as blast-radius boundaries, and a Qdrant-backed calibration loop.
 
 ## Table of Contents
 
 1. [Background: the loop engineering moment](#background-the-loop-engineering-moment)
 2. [The verifiability gap](#the-verifiability-gap)
 3. [Why more review agents don't close the gap](#why-more-review-agents-dont-close-the-gap)
-4. [risk-gate: Library Overview and Module Layout](#risk-gate-library-overview-and-module-layout)
-5. [Installing and Using risk-gate](#installing-and-using-risk-gate)
+4. [Verdict: Library Overview and Module Layout](#verdict-library-overview-and-module-layout)
+5. [Installing and Using Verdict](#installing-and-using-verdict)
 6. [Component One: The Risk Classifier](#component-one-the-risk-classifier)
    - [Checkable signals](#checkable-signals)
    - [Static fan-out analysis](#static-fan-out-analysis)
@@ -42,7 +42,7 @@ Loops work extremely well on bounded, mechanically checkable work. Triage a fail
 
 The trouble starts once you point the same loop at something that does not reduce to pass/fail. Self-reported accounts from teams running lights-off agentic pipelines through 2025–2026 — no human reading agent-generated code before merge — describe review quality, incident rates, and bugs-per-developer trending the wrong way after the switch, even while test suites stayed green. None of this is because the agents were failing their tests. It is because the tests were never checking the thing that eventually cost them time: whether the codebase stayed easy to change.
 
-I would consider that moment less a failure of agent capability and more a failure of loop engineering. The loops were honest about what they measured. They were silent about what they could not measure. `risk-gate` is my attempt to make that silence structural instead of accidental — a library, not a one-off supervisor script, precisely because the failure mode recurs across every codebase that adopts agentic loops, not just the one I happen to be working in.
+I would consider that moment less a failure of agent capability and more a failure of loop engineering. The loops were honest about what they measured. They were silent about what they could not measure. `verdict` is my attempt to make that silence structural instead of accidental — a library, not a one-off supervisor script, precisely because the failure mode recurs across every codebase that adopts agentic loops, not just the one I happen to be working in.
 
 ## The verifiability gap
 
@@ -56,18 +56,18 @@ where $t$ is a step in an agentic plan, $S(t) \in [0,1]$ is the *success meaning
 
 The cost of a bad architectural decision surfaces weeks or months later, when a one-line change requires touching eleven files. RL cannot optimize against a signal that arrives that late, and neither can a loop's retry logic. The asymmetry is invisible from inside the loop: an agent iterating against a test suite has no internal signal that says "you are currently making a decision this suite cannot evaluate." It converges on a passing, poorly designed solution with the same confidence it shows for a well-designed one.
 
-A useful operational corollary, and the thesis `risk-gate` exists to enforce: **a loop should refuse to terminate successfully when $G(t)$ exceeds a threshold**, even if $M(\sigma_t) = 1$. That refusal is escalation.
+A useful operational corollary, and the thesis `verdict` exists to enforce: **a loop should refuse to terminate successfully when $G(t)$ exceeds a threshold**, even if $M(\sigma_t) = 1$. That refusal is escalation.
 
 ## Why more review agents don't close the gap
 
 The natural response — more review agents, more linters, an adversarial-review pass — raises the floor. It catches obviously bad code. It does not raise the ceiling: adding a second pass/fail check on top of an already-blind stop condition does not create the missing signal. In practice this means a second LLM critiquing the first (bounded by shared priors), a static-analysis pass that was already cheap, or an adversarial agent producing prose rather than a scalar oracle. The failure mode I care about is not "the review agent missed a bug." It is "the review agent approved a design the stop condition was never capable of evaluating." The architecture needs a routing decision that admits when measurement is insufficient — which is what a risk classifier is for, and why it's the first module in the library rather than an afterthought bolted onto an existing loop.
 
-## risk-gate: Library Overview and Module Layout
+## Verdict: Library Overview and Module Layout
 
-`risk-gate` is deliberately small: five modules, each owning exactly one of the five components, with a dependency footprint limited to `qdrant-client` for the calibration store and whatever the host loop framework already provides (I build against **LangGraph**, but nothing in the classifier, executor, or checkpoint modules requires it). The intended package layout:
+`verdict` is deliberately small: five modules, each owning exactly one of the five components, with a dependency footprint limited to `qdrant-client` for the calibration store and whatever the host loop framework already provides (I build against **LangGraph**, but nothing in the classifier, executor, or checkpoint modules requires it). The intended package layout:
 
 ```
-risk_gate/
+verdict/
   __init__.py
   classifier.py      # RiskClassifier: scores a proposed step
   contracts.py         # VerifierContract: environment + instruction + scoring fn
@@ -103,19 +103,19 @@ Each module has exactly one public class and a small, stable set of dataclasses 
                        └────────────┘
 ```
 
-## Installing and Using risk-gate
+## Installing and Using Verdict
 
 The library ships as a normal Python package with a minimal dependency set — `qdrant-client` and standard library only, with the host framework (LangGraph, or any other graph/agent orchestration layer) provided by the caller rather than pulled in as a hard dependency:
 
 ```bash
-pip install risk-gate qdrant-client
+pip install verdict-agents qdrant-client
 ```
 
 Wiring it into an existing LangGraph supervisor is meant to be a few lines at the node level, not a rewrite of the graph:
 
 ```python
-from risk_gate.classifier import RiskClassifier, ClassifierConfig
-from risk_gate.calibration import CalibrationStore
+from verdict.classifier import RiskClassifier, ClassifierConfig
+from verdict.calibration import CalibrationStore
 from qdrant_client import QdrantClient
 
 calibration_store = CalibrationStore(QdrantClient(url="localhost:6333"), embed_fn=my_embed_fn)
@@ -160,7 +160,7 @@ where $\mathbb{1}_{\text{verifier}}(t) \in \{0,1\}$ indicates whether a verifier
 Fan-out should not be "number of files the agent *says* it will touch." Agents understate scope. Prefer static analysis: parse proposed edit sites, resolve symbols, count call sites and import dependents.
 
 ```python
-# risk_gate/classifier.py
+# verdict/classifier.py
 import ast
 from pathlib import Path
 
@@ -207,7 +207,7 @@ Verifier existence is similarly mechanical: given a step, do we have a `Verifier
 The public surface of `classifier.py` is small on purpose: two dataclasses, a config, and one class with one entry point.
 
 ```python
-# risk_gate/classifier.py (continued)
+# verdict/classifier.py (continued)
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -292,10 +292,10 @@ Steps that clear the classifier run inside `BoundedExecutor`, a capped loop with
 I borrow the three-part shape popularized by **Harbor**-style agent environments: *(environment, instruction, scoring function)*. The environment is the sandbox. The instruction is the step description plus constraints. The scoring function returns a scalar in $[0,1]$. The contract is attached *before* the agent iterates, so the stop condition is not improvised mid-loop.
 
 ```python
-# risk_gate/contracts.py
+# verdict/contracts.py
 from dataclasses import dataclass
 from typing import Any, Callable
-from risk_gate.classifier import ProposedStep
+from verdict.classifier import ProposedStep
 
 
 @dataclass
@@ -356,10 +356,10 @@ $$
 When $\text{exhaust}(t)=1$, the step enters escalation with reason `verifier_exhausted`. Calibration later treats exhaustion as a positive label for "should have been higher risk."
 
 ```python
-# risk_gate/executor.py
+# verdict/executor.py
 from typing import Callable
-from risk_gate.classifier import ProposedStep
-from risk_gate.contracts import VerifierContract, ExecutionResult
+from verdict.classifier import ProposedStep
+from verdict.contracts import VerifierContract, ExecutionResult
 
 
 class BoundedExecutor:
@@ -392,10 +392,10 @@ Steps that do not clear the classifier — or that exhaust their retries in `Bou
 I deliberately avoid full design documents. Prefer three compact views: **call-stack diff** (control-flow edges gained/lost), **file-tree diff** (added/removed/moved paths), and **interface signatures** (before/after for functions at stake).
 
 ```python
-# risk_gate/escalation.py
+# verdict/escalation.py
 from dataclasses import dataclass
-from risk_gate.classifier import ProposedStep, RiskScore, extract_changed_symbols
-from risk_gate.contracts import ExecutionResult
+from verdict.classifier import ProposedStep, RiskScore, extract_changed_symbols
+from verdict.contracts import ExecutionResult
 
 
 @dataclass
@@ -448,18 +448,18 @@ Wired into LangGraph, the pause itself is a single `interrupt()` call around the
 
 ```python
 from langgraph.types import interrupt
-from risk_gate.escalation import EscalationArtifact
+from verdict.escalation import EscalationArtifact
 
 def escalate_node(state) -> dict:
     step = state.steps[state.step_index]
     package = EscalationArtifact.build(step, state.execution_history, state.risk)
-    decision = interrupt({"type": "risk_gate_escalation", "package": package.__dict__})
+    decision = interrupt({"type": "verdict_escalation", "package": package.__dict__})
     return {"escalation_outcome": decision["outcome"], "human_notes": decision.get("notes")}
 ```
 
 ## Component Four: Checkpoint Commits as Blast-Radius Boundaries
 
-Every merge point between the bounded and escalation paths is also a checkpoint: a known-good state the system can roll back to if a downstream verifier later fails. In most agent frameworks, checkpoints mean *resumability*. In `risk-gate`, they also mean *containment*: bound how much bad work can accumulate before anyone notices.
+Every merge point between the bounded and escalation paths is also a checkpoint: a known-good state the system can roll back to if a downstream verifier later fails. In most agent frameworks, checkpoints mean *resumability*. In `verdict`, they also mean *containment*: bound how much bad work can accumulate before anyone notices.
 
 Without this, a misclassified step becomes the foundation later steps quietly build on. Blast radius after step $k$:
 
@@ -470,7 +470,7 @@ $$
 Checkpointing after every gated step keeps $B(k)$ small by construction.
 
 ```python
-# risk_gate/checkpoint.py
+# verdict/checkpoint.py
 import subprocess
 
 
@@ -485,7 +485,7 @@ class CheckpointCommit:
             sha = f"snap-{len(self._stack)}-{step_id}"
         else:
             subprocess.run(["git", "add", "-A"], cwd=self.repo_path, check=True)
-            msg = f"risk-gate-checkpoint: {step_id} — {description[:72]}"
+            msg = f"verdict-checkpoint: {step_id} — {description[:72]}"
             subprocess.run(
                 ["git", "commit", "-m", msg, "--allow-empty"], cwd=self.repo_path, check=True,
             )
@@ -520,18 +520,18 @@ Online update for class-conditional incident rate: $h_{c} \leftarrow (1-\alpha)\
 `CalibrationStore` stores step embeddings plus incident labels in Qdrant so `historical_rate` can query *similar* past steps, not only exact `task_class` matches:
 
 ```python
-# risk_gate/calibration.py
+# verdict/calibration.py
 import uuid
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
     Distance, FieldCondition, Filter, MatchValue,
     PointStruct, VectorParams, PayloadSchemaType,
 )
-from risk_gate.classifier import ProposedStep, RiskScore, RiskClassifier
+from verdict.classifier import ProposedStep, RiskScore, RiskClassifier
 
 
 class CalibrationStore:
-    def __init__(self, client: QdrantClient, embed_fn, collection: str = "risk_gate_incidents"):
+    def __init__(self, client: QdrantClient, embed_fn, collection: str = "verdict_incidents"):
         self.client, self.embed_fn, self.collection = client, embed_fn, collection
         names = {c.name for c in client.get_collections().collections}
         if collection not in names:
@@ -612,17 +612,17 @@ $$
 
 Step B routes to `EscalationArtifact.build`, producing a `ReviewPackage` with three questions for the reviewer, including the mandatory one for any step lacking a verifier. A human redirects: keep billing in-process but isolate a module boundary with explicit interfaces. `CheckpointCommit.commit` records the redirected state; `CalibrationStore.record` stores $\ell=0.5$ for this step, which nudges $h(t)$ for `task_class="boundary"` slightly upward the next time a similar step is scored.
 
-The contrast is the thesis `risk-gate` is built to enforce mechanically: **fan-out without verifiers is not the same object as fan-out with verifiers.** Lights-off factories that optimize only for "tests green" systematically promote Step-B work into Step-A paths. The library exists to make that promotion expensive and loud, at the level of a reusable classifier rather than a one-off check somebody has to remember to write into each new project.
+The contrast is the thesis `verdict` is built to enforce mechanically: **fan-out without verifiers is not the same object as fan-out with verifiers.** Lights-off factories that optimize only for "tests green" systematically promote Step-B work into Step-A paths. The library exists to make that promotion expensive and loud, at the level of a reusable classifier rather than a one-off check somebody has to remember to write into each new project.
 
 ## Challenges and Open Problems
 
 **False negatives in the classifier.** Fan-out and verifier-existence are proxies — a one-file change can still be a bad architectural decision, and a ten-file change can be entirely mechanical. Getting the false-negative rate down is an open calibration problem, and it is the one place where a bad call has the same silent-failure characteristic that motivated the whole library. Exhaustion-based reclassification in `BoundedExecutor` mitigates some misses; it does not help when a weak verifier passes cleanly on work it shouldn't have approved.
 
-**Escalation cost.** A deployment that escalates too aggressively reproduces the original bottleneck — a human reviewing everything, with extra library plumbing in between. Whether `CalibrationStore.recalibrate` converges $\tau$ to a stable low escalation rate $E$ for a given codebase, or whether high architectural churn simply requires a permanently higher rate, is an empirical question I don't yet have multi-repo data to answer, since `risk-gate` hasn't run in enough independent codebases yet to say.
+**Escalation cost.** A deployment that escalates too aggressively reproduces the original bottleneck — a human reviewing everything, with extra library plumbing in between. Whether `CalibrationStore.recalibrate` converges $\tau$ to a stable low escalation rate $E$ for a given codebase, or whether high architectural churn simply requires a permanently higher rate, is an empirical question I don't yet have multi-repo data to answer, since `verdict` hasn't run in enough independent codebases yet to say.
 
 **Cold start and checkpoint throughput.** `CalibrationStore` is empty on day one; the $0.2$ prior for unknown classes is a placeholder, not a calibrated number. `CheckpointCommit.commit`-per-step maximizes containment and can thrash git history on high-volume mechanical factories; batching across proven-mechanical sequences re-opens blast radius inside the batch. Adaptive batching conditioned on $R(t)$ is plausible future work for the `checkpoint` module — and a new source of silent accumulation if the conditioner is wrong.
 
-**The training gap remains.** None of this addresses the underlying training gap — `risk-gate` routes around it, at the loop level, for a single team's codebase. If a future model generation acquires a robust sense of maintainability, most of the escalation and calibration modules become redundant. Until a benchmark result makes that credible rather than aspirational, treating verifiability as an explicit, checkable property of each step — enforced by a small library rather than reinvented per project — seems like the more defensible place to put the engineering effort.
+**The training gap remains.** None of this addresses the underlying training gap — `verdict` routes around it, at the loop level, for a single team's codebase. If a future model generation acquires a robust sense of maintainability, most of the escalation and calibration modules become redundant. Until a benchmark result makes that credible rather than aspirational, treating verifiability as an explicit, checkable property of each step — enforced by a small library rather than reinvented per project — seems like the more defensible place to put the engineering effort.
 
 ## References
 

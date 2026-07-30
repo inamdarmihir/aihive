@@ -1,7 +1,7 @@
 ---
-title: "Detecting Tool-Contract Drift Across MCP Server Upgrades"
+title: "Ledger: A Consumer-Side Contract Guard for MCP Tool-Schema Drift"
 date: 2026-07-10
-description: "The MCP specification's 2026-07-28 revision lets clients cache tools/list results — a real efficiency win that also widens the window during which your agent can silently reason against a stale schema for a remote server you don't control. This post covers a consumer-side contract guard: daily schema snapshots, a deterministic structural diff, and a Qdrant-backed semantic-drift check that catches reworded tool descriptions a JSON-schema differ cannot."
+description: "The MCP specification's 2026-07-28 revision lets clients cache tools/list results — a real efficiency win that also widens the window during which your agent can silently reason against a stale schema for a remote server you don't control. Ledger is a pip-installable, consumer-side contract guard: daily schema snapshots, a deterministic structural diff, and a Qdrant-backed semantic-drift check that catches reworded tool descriptions a JSON-schema differ cannot."
 tags: ["agents", "mcp", "reliability", "observability", "qdrant"]
 author: "Mihir Inamdar"
 showToc: true
@@ -10,21 +10,22 @@ math: true
 
 The **Model Context Protocol**'s [2026-07-28 specification revision](https://modelcontextprotocol.io/specification/2026-07-28/changelog) added caching hints — `ttlMs` and `cacheScope` — to `tools/list` results, letting a client hold onto a server's declared tool set instead of re-fetching it every session. For a server with a large, stable tool surface, that's a genuine efficiency win: fewer round trips, better prompt-cache hit rates, less redundant traffic on a stateless transport. It is also, if you consume MCP servers you don't control, a change that quietly widens an existing blind spot.
 
-This post is about that blind spot specifically: schema drift on a remote MCP server maintained by someone else — a third-party connector, another team's internal server, anything not built and versioned by you — and how to monitor for it from the consuming side. It does not cover how to design your *own* tool schemas well (that's a naming and scoping discipline, covered elsewhere); it does not cover prompt injection or adversarial tool misuse; and it is not a tutorial on building an MCP server or client. Familiarity with MCP's basic `tools/list` / `tools/call` shape and with Qdrant's filtering and search API is assumed.
+This post is about that blind spot specifically: schema drift on a remote MCP server maintained by someone else — a third-party connector, another team's internal server, anything not built and versioned by you — and **Ledger**, a small library that monitors for it from the consuming side by keeping an append-only ledger of every tool's schema history. It does not cover how to design your *own* tool schemas well (that's a naming and scoping discipline, covered elsewhere); it does not cover prompt injection or adversarial tool misuse; and it is not a tutorial on building an MCP server or client. Familiarity with MCP's basic `tools/list` / `tools/call` shape and with Qdrant's filtering and search API is assumed.
 
 ## Table of Contents
 
 1. [A Different Failure Mode: Monitoring, Not Design](#a-different-failure-mode-monitoring-not-design)
 2. [What "Breaking" Means for a Tool Schema](#what-breaking-means-for-a-tool-schema)
-3. [Design: The Contract Guard](#design-the-contract-guard)
+3. [Design: Ledger's Contract Guard](#design-ledgers-contract-guard)
 4. [Component One: Daily Snapshots as Ground Truth](#component-one-daily-snapshots-as-ground-truth)
 5. [Component Two: The Structural Diff](#component-two-the-structural-diff)
 6. [Component Three: Qdrant as the Semantic-Drift Side-Piece](#component-three-qdrant-as-the-semantic-drift-side-piece)
 7. [Wiring It Together](#wiring-it-together)
-8. [Worked Example: search_customers Quietly Changes Its Manners](#worked-example-search_customers-quietly-changes-its-manners)
-9. [Why Cacheable tools/list Makes This More Necessary, Not Less](#why-cacheable-toolslist-makes-this-more-necessary-not-less)
-10. [Challenges and Open Problems](#challenges-and-open-problems)
-11. [References](#references)
+8. [Installing and Using Ledger](#installing-and-using-ledger)
+9. [Worked Example: search_customers Quietly Changes Its Manners](#worked-example-search_customers-quietly-changes-its-manners)
+10. [Why Cacheable tools/list Makes This More Necessary, Not Less](#why-cacheable-toolslist-makes-this-more-necessary-not-less)
+11. [Challenges and Open Problems](#challenges-and-open-problems)
+12. [References](#references)
 
 ## A Different Failure Mode: Monitoring, Not Design
 
@@ -48,9 +49,9 @@ Not every schema change is equally dangerous, and treating them all the same eit
 
 **Rewording a description without touching the schema shape is the case a structural differ cannot see at all, and it can still matter.** Suppose `search_customers`'s JSON Schema is byte-for-byte identical before and after, but the description changes from "Search the customer database" to "Search the customer database. Use sparingly — this endpoint is now rate-limited and expensive to call at high volume." Nothing broke. No call that worked yesterday fails today. But the model's *behavior* can shift meaningfully: an agent that previously called this tool inside a loop to check several customers in sequence might now avoid it, batch differently, or ask a clarifying question it wouldn't have asked before — because the description is a prompt the model reads before every decision to invoke the tool, and prompts change inference even when types don't change at all. A JSON-Schema diff reports zero changes here. This is precisely why a monitoring system built only on structural diffing has a blind spot, and why the design below adds a second, semantic layer specifically to cover it.
 
-## Design: The Contract Guard
+## Design: Ledger's Contract Guard
 
-The shape of the fix follows directly from the taxonomy above: one deterministic layer for the changes a JSON-Schema diff can classify with certainty, and one similarity-based layer for the changes that require comparing meaning, not shape. Both layers read from the same ground truth — a snapshot history that is captured independently of whatever your live MCP client caches for ordinary traffic.
+The shape of **Ledger**'s fix follows directly from the taxonomy above: one deterministic layer for the changes a JSON-Schema diff can classify with certainty, and one similarity-based layer for the changes that require comparing meaning, not shape. Both layers read from the same ground truth — a snapshot history that is captured independently of whatever your live MCP client caches for ordinary traffic.
 
 ```
                     ┌─────────────────────────────┐
@@ -419,6 +420,47 @@ def format_for_digest(report: DriftReport) -> str:
 ```
 
 A hard break — a required parameter renamed or removed — genuinely warrants interrupting someone, because any agent still holding the old schema in a cached `tools/list` response is about to start failing calls it thinks are valid. A soft break or a semantic flag warrants a look before the next planning cycle, not a pager alert; both are "something changed and a human should form an opinion about it," not "something is actively broken right now."
+
+## Installing and Using Ledger
+
+Ledger ships as a single pip-installable package around the components built up in this post:
+
+```bash
+pip install ledger-mcp
+```
+
+```
+ledger/
+├── snapshot.py     # ToolSnapshot, SnapshotStore, snapshot_all_servers()
+├── diff.py           # diff_schemas(), StructuralChange, worst_severity()
+├── semantic.py          # ToolDefinitionHistory (Qdrant-backed drift check)
+├── report.py              # DriftReport, run_contract_guard()
+└── routing.py                # route_report(), format_for_digest()
+```
+
+A minimal daily job wired against your existing MCP clients:
+
+```python
+from ledger.snapshot import SnapshotStore, snapshot_all_servers
+from ledger.semantic import ToolDefinitionHistory
+from ledger.report import run_contract_guard
+from ledger.routing import route_report, format_for_digest
+
+store = SnapshotStore(path="tool_snapshots.jsonl")
+history = ToolDefinitionHistory(qdrant_client, embed_fn)
+
+snapshots = snapshot_all_servers(your_mcp_clients, store, snapshot_date=today)
+reports = run_contract_guard(store, history, snapshots)
+
+for report in reports:
+    route = route_report(report)
+    if route == "page_immediately":
+        page_oncall(format_for_digest(report))
+    elif route == "daily_digest":
+        append_to_digest(format_for_digest(report))
+```
+
+`your_mcp_clients` is whatever dictionary of MCP client instances your agent framework already maintains — Ledger doesn't implement its own MCP client, it wraps around one you already have with `force_refresh=True` calls on its own independent schedule.
 
 ## Worked Example: search_customers Quietly Changes Its Manners
 

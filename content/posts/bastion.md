@@ -1,14 +1,14 @@
 ---
-title: "mcp-response-guard: A Schema-Aware Validator for Incomplete Tool Responses"
+title: "Bastion: A Schema-Aware Validator for Incomplete MCP Tool Responses"
 date: 2026-07-06
-description: "The spec for mcp-response-guard, an installable interceptor library that catches silent, schema-valid-but-incomplete MCP tool responses using expectation schemas, calibrated anomaly scoring, and a Qdrant-backed memory of what normal looks like."
+description: "The spec for Bastion, an installable interceptor library that catches silent, schema-valid-but-incomplete MCP tool responses using expectation schemas, calibrated anomaly scoring, and a Qdrant-backed memory of what normal looks like."
 tags: ["agents", "mcp", "qdrant", "validation", "reliability", "tool-calling"]
 author: "Mihir Inamdar"
 showToc: true
 math: true
 ---
 
-An agent calling a tool through the **Model Context Protocol (MCP)** ([Anthropic, 2024](https://modelcontextprotocol.io/)) treats a `200`-equivalent JSON-RPC result as ground truth. It has no innate sense of whether the payload it just received is *complete*, *representative*, or merely *well-formed*. This post is the implementation spec for **mcp-response-guard**, a small library that closes that gap: an intercepting MCP client, a schema layer describing what a "normal" response looks like, an anomaly scorer, and a Qdrant collection that remembers response history per tool-plus-argument cluster. I cover module boundaries, function signatures, the Qdrant schema, and how to wire it into an existing agent — precise enough to hand to an engineer or a coding agent and get a working package back. I will not cover prompt injection, tool-description poisoning, or adversarial tool misuse — those are distinct failure modes with their own literature (notably OWASP ASI01–ASI06). This post only addresses failures where the tool is behaving as designed but the response is quietly insufficient for the decision the agent is about to make.
+An agent calling a tool through the **Model Context Protocol (MCP)** ([Anthropic, 2024](https://modelcontextprotocol.io/)) treats a `200`-equivalent JSON-RPC result as ground truth. It has no innate sense of whether the payload it just received is *complete*, *representative*, or merely *well-formed*. This post is the implementation spec for **Bastion**, a small library that closes that gap: an intercepting MCP client, a schema layer describing what a "normal" response looks like, an anomaly scorer, and a Qdrant collection that remembers response history per tool-plus-argument cluster. I cover module boundaries, function signatures, the Qdrant schema, and how to wire it into an existing agent — precise enough to hand to an engineer or a coding agent and get a working package back. I will not cover prompt injection, tool-description poisoning, or adversarial tool misuse — those are distinct failure modes with their own literature (notably OWASP ASI01–ASI06). This post only addresses failures where the tool is behaving as designed but the response is quietly insufficient for the decision the agent is about to make.
 
 ## Table of Contents
 
@@ -16,7 +16,7 @@ An agent calling a tool through the **Model Context Protocol (MCP)** ([Anthropic
 2. [Why This Is Different from Known Failure Modes](#why-this-is-different-from-known-failure-modes)
 3. [A Taxonomy of Silent Failures](#a-taxonomy-of-silent-failures)
 4. [Package Layout and Design Overview](#package-layout-and-design-overview)
-5. [Installing and Using mcp-response-guard](#installing-and-using-mcp-response-guard)
+5. [Installing and Using Bastion](#installing-and-using-bastion)
 6. [schema.py: Expectation Schemas](#schemapy-expectation-schemas)
 7. [client.py: The Validating Interceptor](#clientpy-the-validating-interceptor)
 8. [scoring.py: Anomaly Scoring](#scoringpy-anomaly-scoring)
@@ -49,7 +49,7 @@ Nothing here is malformed. The call returns in 40ms, the schema is valid JSON, t
 
 The same pattern shows up quietly elsewhere: `get_invoice_summary` returning zeros from a lagging replica, or `search_transactions` returning three rows after a rate limiter substituted a thin page with HTTP 200. In each case the agent trusts the tool and acts.
 
-This is the general shape: **a response can be schema-valid and still be semantically incomplete**, and MCP has no native mechanism to distinguish the two. Transport success is not semantic sufficiency. `mcp-response-guard` exists to make that distinction mechanically, at the client boundary, without requiring every tool author to redesign their API.
+This is the general shape: **a response can be schema-valid and still be semantically incomplete**, and MCP has no native mechanism to distinguish the two. Transport success is not semantic sufficiency. `bastion` exists to make that distinction mechanically, at the client boundary, without requiring every tool author to redesign their API.
 
 ## Why This Is Different from Known Failure Modes
 
@@ -59,7 +59,7 @@ It is worth being precise about scope, because agentic security research in 2026
 
 The failure mode here has no adversary. The tool is not compromised; the description is intact. A load balancer drops connections, a replica lags, a rate limiter returns a valid-but-empty page, a cache serves stale data during a deploy. A human calling the same API notices an empty list where fifty rows were expected. An agent, absent instrumentation, has no such prior — a well-typed empty array looks as valid as a full one.
 
-In classical reliability terms this is closer to **fail-silent** behavior ([Cristian, 1991](https://ieeexplore.ieee.org/document/64997)) than Byzantine faults: the component returns a plausible answer rather than crashing. Fail-silent systems are manageable when silence is detectable (timeouts); they are harder when silence is *content-shaped*. That is the default MCP-agent regime today, and it's the regime `mcp-response-guard` is built for.
+In classical reliability terms this is closer to **fail-silent** behavior ([Cristian, 1991](https://ieeexplore.ieee.org/document/64997)) than Byzantine faults: the component returns a plausible answer rather than crashing. Fail-silent systems are manageable when silence is detectable (timeouts); they are harder when silence is *content-shaped*. That is the default MCP-agent regime today, and it's the regime `bastion` is built for.
 
 ## A Taxonomy of Silent Failures
 
@@ -77,10 +77,10 @@ The common thread is that all four are invisible to anything that validates only
 
 ## Package Layout and Design Overview
 
-`mcp-response-guard` is a thin interceptor between the MCP client and the agent's reasoning loop, plus the state it needs to score responses against history. The public package is four modules and one optional extension:
+`bastion` is a thin interceptor between the MCP client and the agent's reasoning loop, plus the state it needs to score responses against history. The public package is four modules and one optional extension:
 
 ```
-mcp_response_guard/
+bastion/
   __init__.py       # public re-exports
   schema.py         # ExpectationSchema, SchemaStore, cardinality/pagination/freshness specs
   client.py         # ValidatingMCPClient (wraps any MCP client), ToolResult, Verdict
@@ -114,24 +114,24 @@ mcp_response_guard/
 
 `ValidatingMCPClient` is the only new code path an existing agent needs to adopt — everything else lives behind it. Recording is asynchronous so monitoring never blocks the hot path.
 
-## Installing and Using mcp-response-guard
+## Installing and Using Bastion
 
 The package targets Python 3.11+ and depends on `qdrant-client>=1.18` for the current `query_points` API, plus a JSON-path-lite utility with no other hard dependencies. Embeddings are pluggable — bring `fastembed`, `sentence-transformers`, or an API-backed embedder.
 
 ```bash
-pip install mcp-response-guard
+pip install bastion-mcp
 # optional: bundled local embeddings for the Qdrant history store
-pip install "mcp-response-guard[fastembed]"
+pip install "bastion-mcp[fastembed]"
 ```
 
 Minimal wiring around an existing MCP client:
 
 ```python
 from qdrant_client import QdrantClient
-from mcp_response_guard import (
+from bastion import (
     ValidatingMCPClient, SchemaStore, HistoryStore, ResponseScorer,
 )
-from mcp_response_guard.schema import (
+from bastion.schema import (
     ExpectationSchema, CardinalitySpec, PaginationSpec,
 )
 
@@ -309,9 +309,9 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from typing import Any, Protocol
-from mcp_response_guard.schema import SchemaStore
-from mcp_response_guard.history import HistoryStore
-from mcp_response_guard.scoring import ResponseScorer
+from bastion.schema import SchemaStore
+from bastion.history import HistoryStore
+from bastion.scoring import ResponseScorer
 
 class MCPClient(Protocol):
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> "ToolResult": ...
@@ -392,9 +392,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 import time, datetime as dt
-from mcp_response_guard.client import ToolResult, Verdict
-from mcp_response_guard.schema import ExpectationSchema
-from mcp_response_guard.history import HistoryStore
+from bastion.client import ToolResult, Verdict
+from bastion.schema import ExpectationSchema
+from bastion.history import HistoryStore
 
 @dataclass
 class CheckResult:
@@ -670,14 +670,14 @@ Seeding with `total_count` is the strongest cold-start lever available: if `len(
 
 ## policy.py: Remediation at the Agent Layer
 
-Annotation without policy is incomplete. Retry, escalate, or proceed-with-caveat is task-specific, so `mcp-response-guard` ships it as an optional module the agent loop imports separately from the core interceptor:
+Annotation without policy is incomplete. Retry, escalate, or proceed-with-caveat is task-specific, so `bastion` ships it as an optional module the agent loop imports separately from the core interceptor:
 
 ```python
 from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Literal
-from mcp_response_guard.client import ToolResult, Verdict
+from bastion.client import ToolResult, Verdict
 
 @dataclass
 class Retry:
@@ -754,7 +754,7 @@ The design closes a real gap, but not completely.
 
 **Distribution shift vs anomaly.** Customer 4471 having 2 accounts may be anomalous relative to the fleet and still correct for that customer. Hybridizing fleet priors with entity-specific overrides once an entity has its own $N_{\min}$ samples is ongoing work, and would live as a refinement inside `cardinality_baseline`.
 
-**MCP may eventually grow sufficiency signals.** If the ecosystem standardizes `total_count`, `next_cursor`, and `as_of`, much of `mcp-response-guard` becomes consistency checking — a strictly easier problem than the current inference-from-history approach. Until then, this validator is a pragmatic layer on today's MCP, not a substitute for better tool contracts.
+**MCP may eventually grow sufficiency signals.** If the ecosystem standardizes `total_count`, `next_cursor`, and `as_of`, much of `bastion` becomes consistency checking — a strictly easier problem than the current inference-from-history approach. Until then, this validator is a pragmatic layer on today's MCP, not a substitute for better tool contracts.
 
 None of these are reasons to skip validation — an agent reasoning over silently incomplete data is a worse failure mode than a slightly slower one — but they are reasons to treat this as a versioned library with an evolving evaluation suite rather than a finished answer.
 

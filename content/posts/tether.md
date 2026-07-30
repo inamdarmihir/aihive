@@ -1,14 +1,14 @@
 ---
-title: "Fixing Progressive Latency Drift in Long Realtime Voice Agent Sessions"
+title: "Tether: A Retrieval-Seeded Session Anchor for Realtime Voice Agents"
 date: 2026-07-22
-description: "Voice agents built on OpenAI's Realtime API get slower the longer a session runs, and the standard fix — pruning or summarizing conversation history — doesn't reliably reset it. This post proposes a structurally different mitigation: a live, retrieval-seeded session profile backed by Qdrant, plus a per-turn latency probe that rotates sessions before drift becomes audible."
+description: "Voice agents built on OpenAI's Realtime API get slower the longer a session runs, and the standard fix — pruning or summarizing conversation history — doesn't reliably reset it. Tether is a small library that keeps a voice agent's session state anchored instead: a live, retrieval-seeded session profile backed by Qdrant, plus a per-turn latency probe that rotates sessions before drift becomes audible, wired directly into the Realtime API's event model."
 tags: ["agents", "voice", "realtime-api", "latency", "reliability", "qdrant"]
 author: "Mihir Inamdar"
 showToc: true
 math: true
 ---
 
-A voice agent that feels conversational in the first two minutes of a call and noticeably laggy by minute eight is not a rare failure mode — it is, as of mid-2026, a reported and unresolved characteristic of long-running sessions on OpenAI's Realtime API. In this post I look at what's actually been documented about this drift, why the mitigation most teams reach for first (pruning or summarizing conversation history) does not reliably fix it, and propose a structurally different approach: replace the growing, compacted transcript with a small, continuously retrieved slice of structured session state. This post does not cover speech-to-text accuracy, voice cloning, or turn-taking/VAD tuning in general — those are separate problems with their own literature. I also want to be upfront about scope on the harder question: OpenAI has not published a root-cause explanation for why latency climbs even after context is pruned, so what follows is a plausible, evidence-informed mitigation for one hypothesis, not a confirmed fix. Familiarity with the Realtime API's event model (`conversation.item.create`, `conversation.item.delete`, `response.create`) is assumed.
+A voice agent that feels conversational in the first two minutes of a call and noticeably laggy by minute eight is not a rare failure mode — it is, as of mid-2026, a reported and unresolved characteristic of long-running sessions on OpenAI's Realtime API. In this post I look at what's actually been documented about this drift, why the mitigation most teams reach for first (pruning or summarizing conversation history) does not reliably fix it, and propose a structurally different approach, implemented as **Tether**: replace the growing, compacted transcript with a small, continuously retrieved slice of structured session state that keeps a session anchored to what actually matters right now. This post does not cover speech-to-text accuracy, voice cloning, or turn-taking/VAD tuning in general — those are separate problems with their own literature. I also want to be upfront about scope on the harder question: OpenAI has not published a root-cause explanation for why latency climbs even after context is pruned, so what follows is a plausible, evidence-informed mitigation for one hypothesis, not a confirmed fix. Familiarity with the Realtime API's event model (`conversation.item.create`, `conversation.item.delete`, `response.create`) is assumed.
 
 ## Table of Contents
 
@@ -30,10 +30,11 @@ A voice agent that feels conversational in the first two minutes of a call and n
 10. [Putting It Together: The Rotation Flow](#putting-it-together-the-rotation-flow)
     - [Where This Logic Has to Live: Server-Mediated Sessions](#where-this-logic-has-to-live-server-mediated-sessions)
 11. [Validating the Rotation Trigger Offline](#validating-the-rotation-trigger-offline)
-12. [Worked Example](#worked-example)
-13. [Does This Generalize Beyond OpenAI's Realtime API?](#does-this-generalize-beyond-openais-realtime-api)
-14. [Challenges and Open Problems](#challenges-and-open-problems)
-15. [References](#references)
+12. [Installing and Using Tether](#installing-and-using-tether)
+13. [Worked Example](#worked-example)
+14. [Does This Generalize Beyond OpenAI's Realtime API?](#does-this-generalize-beyond-openais-realtime-api)
+15. [Challenges and Open Problems](#challenges-and-open-problems)
+16. [References](#references)
 
 ## The 800ms Budget and Why It's Already Tight
 
@@ -73,7 +74,7 @@ Contrast both of these with **accumulated session context**, which is the one la
 
 Both variants of the standard mitigation — pruning items in place, or rotating to a new session reseeded from a summary — attack the same symptom: a long raw transcript. What neither variant changes is the *shape* of the fix: at the moment a session needs fresh state, the model is handed a compacted, lossy text representation of "everything that happened before" and has to re-derive meaning from it before it can respond coherently. A summary is, definitionally, an imperfect compression of the original conversation — details get dropped, structure gets flattened into prose, and the exact facts that matter for the current turn are mixed in with facts that don't matter at all right now. Asking the model to reconstruct working context from that compressed blob, at precisely the moment you want a fast, fresh session, is asking it to do meaningful inference work disguised as a formality.
 
-The alternative I want to develop here is structurally different, not just a smaller version of the same thing: instead of accumulating a transcript and periodically compacting it, maintain a **live, continuously-updated session profile** per caller — the concrete facts, stated preferences, and current task state, extracted incrementally as the conversation happens — stored as structured records plus embeddings, never as a growing block of prose. When a session rotates, the new session isn't seeded with a summary of everything that happened; it's seeded with a small, semantically retrieved slice of facts relevant to *what's actually being discussed right now*, queried against the fact store using the current turn's content. This is a bet on a specific hypothesis about the drift: that some meaningful share of the "growing state" that isn't reset by pruning is a *side effect of the summarization/reconstruction workload itself*, not purely a property of raw item count — and that retrieval-based seeding sidesteps that workload entirely, because the new session is never asked to re-derive anything from an accumulated text block. It hands the model a short list of already-distilled facts instead.
+The alternative I want to develop here — implemented below as **Tether** — is structurally different, not just a smaller version of the same thing: instead of accumulating a transcript and periodically compacting it, maintain a **live, continuously-updated session profile** per caller — the concrete facts, stated preferences, and current task state, extracted incrementally as the conversation happens — stored as structured records plus embeddings, never as a growing block of prose. When a session rotates, the new session isn't seeded with a summary of everything that happened; it's seeded with a small, semantically retrieved slice of facts relevant to *what's actually being discussed right now*, queried against the fact store using the current turn's content. This is a bet on a specific hypothesis about the drift: that some meaningful share of the "growing state" that isn't reset by pruning is a *side effect of the summarization/reconstruction workload itself*, not purely a property of raw item count — and that retrieval-based seeding sidesteps that workload entirely, because the new session is never asked to re-derive anything from an accumulated text block. It hands the model a short list of already-distilled facts instead.
 
 I want to flag directly that this is a hypothesis test, not a guaranteed fix, and come back to that honestly in the closing section. What it does unambiguously do, independent of whether it fully resolves the model-side drift, is bound the size and freshness of what gets reseeded on every rotation — which is a property worth having on its own even if the deeper cause turns out to be something entirely outside client control.
 
@@ -454,6 +455,42 @@ def replay_drift_trigger(latency_trace: list[float], **monitor_kwargs) -> list[i
 ```
 
 Running this against a corpus of logged sessions before shipping the live rotation logic answers several calibration questions cheaply: does `drift_ratio=1.5` fire too eagerly on sessions that never actually degrade badly (a false-positive-rate check), does it fire late enough on sessions the forum reports describe (a sanity check against the "3x by the later part of the call" pattern), and how does `confirm_windows` trade off against detection lag on real, noisy latency traces rather than the idealized ones used to reason about the math above. This doesn't validate the *fact-store reseeding* half of the design — that genuinely can't be validated without live sessions to rotate — but it de-risks the *triggering* half considerably before any of it touches a real call.
+
+## Installing and Using Tether
+
+Tether packages the fact store, the extractor, the retrieval-based reseeder, and the drift monitor as a single library that wraps around an existing Realtime API session rather than replacing your voice stack:
+
+```bash
+pip install tether-voice
+```
+
+```
+tether/
+├── facts.py       # SessionFact, FactStore, dedup-on-write
+├── extractor.py    # incremental per-turn fact extraction
+├── reseed.py        # hybrid retrieval-based session reseeding
+├── monitor.py        # LatencyDriftMonitor, should_rotate()
+└── session.py         # glue: wraps conversation.item.* / response.create events
+```
+
+A minimal integration around an existing Realtime API session:
+
+```python
+from tether.session import TetheredSession
+from tether.monitor import LatencyDriftMonitor
+
+session = TetheredSession(
+    realtime_client=your_realtime_client,
+    fact_store_url="https://your-cluster.qdrant.io",
+    monitor=LatencyDriftMonitor(drift_ratio=1.5, confirm_windows=3),
+)
+
+async for turn in session.stream():
+    if session.monitor.should_rotate():
+        await session.rotate()  # reseeds the new session from retrieved facts, not a summary
+```
+
+`TetheredSession` is a thin wrapper around the same `conversation.item.create` / `response.create` event handlers a Realtime API integration already implements, so adopting Tether doesn't require restructuring an existing voice agent — it slots in as the layer that decides *when* and *how* to reseed, leaving turn handling, tool-calling, and audio streaming to your existing code.
 
 ## Worked Example
 

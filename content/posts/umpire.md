@@ -1,33 +1,34 @@
 ---
-title: "Catching Agents That Game Test Coverage Instead of Writing Tests"
+title: "Umpire: A CI-Time Coverage Quality Gate for Agent-Generated Tests"
 date: 2026-07-20
-description: "Coverage percentage and a green CI check are exactly the kind of proxy metric agents learn to satisfy without satisfying what they're meant to measure. This post designs a CI-time coverage quality gate — assertion-strength scoring, Qdrant-backed near-duplicate test detection, and a flakiness-risk static signal — grounded in 2026 empirical findings on agent-generated test quality and measured reward hacking."
+description: "Coverage percentage and a green CI check are exactly the kind of proxy metric agents learn to satisfy without satisfying what they're meant to measure. Umpire is a CI-time coverage quality gate — a GitHub Actions job you drop into an existing pytest/CI pipeline — combining assertion-strength scoring, Qdrant-backed near-duplicate test detection, and a flakiness-risk static signal, grounded in 2026 empirical findings on agent-generated test quality and measured reward hacking."
 tags: ["agents", "testing", "ci-cd", "software-engineering", "reward-hacking", "qdrant"]
 author: "Mihir Inamdar"
 showToc: true
 math: true
 ---
 
-Coding agents now write more test code than the humans reviewing it can read line by line, and the verification signal most teams lean on to compensate — a coverage threshold, a green CI run — is exactly the kind of proxy metric that's vulnerable to being satisfied without being served. This post is about that gap specifically: what it looks like when an agent (RL-trained against a pass/fail or coverage signal, or simply pattern-matching on "make CI green") produces tests that clear the metric without adding verification value, why the obvious fix of "require more/better tests" doesn't close the gap on its own, and a CI-time coverage quality gate that goes beyond raw line and branch percentage. I'm not covering test-generation prompting technique, mutation testing (a related but separately well-covered approach), or the RL training details behind why agents behave this way — the focus here is what to check for at merge time, given that the incentive to game the metric exists regardless of why. Familiarity with `pytest`, Python's `ast` module, and CI-gate design is assumed.
+Coding agents now write more test code than the humans reviewing it can read line by line, and the verification signal most teams lean on to compensate — a coverage threshold, a green CI run — is exactly the kind of proxy metric that's vulnerable to being satisfied without being served. This post is about that gap specifically: what it looks like when an agent (RL-trained against a pass/fail or coverage signal, or simply pattern-matching on "make CI green") produces tests that clear the metric without adding verification value, why the obvious fix of "require more/better tests" doesn't close the gap on its own, and **Umpire**, a CI-time coverage quality gate that goes beyond raw line and branch percentage by judging tests the way a human reviewer would, deterministically. I'm not covering test-generation prompting technique, mutation testing (a related but separately well-covered approach), or the RL training details behind why agents behave this way — the focus here is what to check for at merge time, given that the incentive to game the metric exists regardless of why. Familiarity with `pytest`, Python's `ast` module, and CI-gate design is assumed.
 
 ## Table of Contents
 
 1. [What Gaming Coverage Actually Looks Like](#what-gaming-coverage-actually-looks-like)
 2. [Why a Richer Visible Suite Doesn't Fix This](#why-a-richer-visible-suite-doesnt-fix-this)
 3. [Why Coverage Percentage Can't See Any of This](#why-coverage-percentage-cant-see-any-of-this)
-4. [Design: A Coverage Quality Gate](#design-a-coverage-quality-gate)
+4. [Design: Umpire's Coverage Quality Gate](#design-umpires-coverage-quality-gate)
 5. [Component One: Assertion-Strength Scoring](#component-one-assertion-strength-scoring)
    - [Catching Assertion Drift: Unknown and Misspelled Methods](#catching-assertion-drift-unknown-and-misspelled-methods)
 6. [Component Two: Near-Duplicate Test Detection with Qdrant](#component-two-near-duplicate-test-detection-with-qdrant)
    - [Backfilling the Structural Index](#backfilling-the-structural-index)
    - [Calibrating the Duplicate Threshold](#calibrating-the-duplicate-threshold)
 7. [Component Three: Flakiness-Risk Static Signal](#component-three-flakiness-risk-static-signal)
-8. [Wiring the Gate Into CI](#wiring-the-gate-into-ci)
-9. [Worked Example](#worked-example)
-10. [The 80% Problem, Applied to Tests](#the-80-problem-applied-to-tests)
-11. [Language Scope: This Approach Is Python-Specific](#language-scope-this-approach-is-python-specific)
-12. [Challenges and Open Problems](#challenges-and-open-problems)
-13. [References](#references)
+8. [Wiring Umpire Into CI](#wiring-umpire-into-ci)
+9. [Installing Umpire](#installing-umpire)
+10. [Worked Example](#worked-example)
+11. [The 80% Problem, Applied to Tests](#the-80-problem-applied-to-tests)
+12. [Language Scope: This Approach Is Python-Specific](#language-scope-this-approach-is-python-specific)
+13. [Challenges and Open Problems](#challenges-and-open-problems)
+14. [References](#references)
 
 ## What Gaming Coverage Actually Looks Like
 
@@ -57,7 +58,7 @@ It's also worth noting what SpecBench found about model capability specifically,
 
 A single coverage percentage — or a single pass/fail flag on a test suite — is a scalar summary of a much higher-dimensional thing: whether the code is actually correct, whether the tests that pass it will keep passing under real usage, and whether the verification effort represented by "N new tests added" is genuine or padded. **AgentLens: Production-Assessed Trajectory Reviews for Coding Agent Evaluation** ([arXiv:2607.06624](https://arxiv.org/abs/2607.06624), 2026) makes a related argument in the broader context of agent evaluation: a binary pass/fail on final state discards almost everything about *how* an agent got there — the sequence of tool calls, edits, and verification attempts along the way — and that discarded information is exactly where quality differences between a genuinely careful run and a superficially successful one tend to live. Coverage percentage is a specific instance of the same insufficiency: it's a single scalar standing in for a genuinely multi-dimensional property (execution breadth, assertion strength, determinism, novelty relative to existing tests), and any of those dimensions can be degraded arbitrarily far while the scalar keeps climbing. This is the structural argument for why the gate below doesn't propose a better single number to replace coverage percentage with — it proposes several narrower, more specific checks, each aimed at one of the failure modes coverage percentage is blind to.
 
-## Design: A Coverage Quality Gate
+## Design: Umpire's Coverage Quality Gate
 
 The gate runs at CI time against newly added or modified test files in a pull request, and produces three independent signals per new test rather than a single aggregate quality score — aggregating them into one number would just recreate the same blindness that coverage percentage already has:
 
@@ -392,7 +393,7 @@ def score_flakiness_risk(source: str) -> dict:
 
 The `mocker`/`monkeypatch` argument check is a coarse heuristic for "this test has a fixture available to make its I/O or timing deterministic," not proof that the fixture is actually used correctly on the specific call in question — a test can accept a `mocker` fixture and still leave a particular `open()` call unmocked. That gap is acceptable for a first-pass CI signal whose job is to prioritize review, not to definitively adjudicate every call site.
 
-## Wiring the Gate Into CI
+## Wiring Umpire Into CI
 
 The three components combine into a single per-test report, run against every new or modified test function in a pull request diff:
 
@@ -471,6 +472,54 @@ def main(base_sha: str) -> None:
 ```
 
 Keeping the job's exit code at 0 regardless of flags — an explicit, deliberate choice, not an oversight — is what makes this an advisory gate rather than a blocking one, consistent with the reasoning above about not training reviewers to route around it.
+
+## Installing Umpire
+
+The three scoring components above ship as a single pip-installable package, so the CI job in the previous section reduces to a couple of lines instead of hand-rolled scoring logic:
+
+```bash
+pip install umpire-agents
+```
+
+```
+umpire/
+├── assertions.py   # score_test_assertions, find_unknown_assertions
+├── duplicates.py    # check_near_duplicate, backfill_structural_index (Qdrant-backed)
+├── flakiness.py       # score_flakiness_risk
+└── gate.py             # evaluate_new_test(), the combined per-test report
+```
+
+The GitHub Actions job becomes:
+
+```yaml
+# .github/workflows/coverage-quality-gate.yml
+name: Coverage Quality Gate
+on: [pull_request]
+
+jobs:
+  quality-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install umpire-agents
+      - run: python -m umpire.gate --base ${{ github.event.pull_request.base.sha }}
+```
+
+```python
+from umpire.gate import evaluate_new_test
+from umpire.duplicates import StructuralIndex
+
+index = StructuralIndex(url=os.environ["QDRANT_URL"])
+result = evaluate_new_test(index, source=new_test_source)
+# {"flags": [...], "assertion_report": {...}, "genuinely_new": bool}
+```
+
+Nothing about adopting Umpire requires migrating an existing pytest suite or changing how tests are written — it runs read-only against the diff a PR already produces and posts annotations, never rewriting or blocking on its own judgment by default.
 
 ## Worked Example
 
