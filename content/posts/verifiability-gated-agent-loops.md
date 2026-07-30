@@ -1,8 +1,8 @@
 ---
 title: "Verifiability-Gated Loops: An Escalation Contract for Agentic Software Factories"
 date: 2026-07-28
-description: "Most agentic loops only check what they were told to check. This post proposes a verifiability-gated architecture — risk classification, bounded execution, escalation, checkpoint commits, and calibration — so loops fail loudly when stop conditions cannot measure what matters."
-tags: ["agents", "verifiability", "human-in-the-loop", "software-engineering", "agent-loops", "reliability"]
+description: "Most agentic loops only check what they were told to check. This post proposes a verifiability-gated architecture — risk classification, bounded execution, escalation, checkpoint commits, and a Qdrant-backed calibration loop — so loops fail loudly when stop conditions cannot measure what matters."
+tags: ["agents", "verifiability", "human-in-the-loop", "software-engineering", "agent-loops", "reliability", "qdrant"]
 author: "Mihir Inamdar"
 showToc: true
 math: true
@@ -29,7 +29,7 @@ I want to narrow the scope considerably. This post does not cover model training
    - [Minimal review artifacts](#minimal-review-artifacts)
    - [LangGraph interrupt and HITL pause](#langgraph-interrupt-and-hitl-pause)
 8. [Component Four: Checkpoint Commits as Blast-Radius Boundaries](#component-four-checkpoint-commits-as-blast-radius-boundaries)
-9. [Component Five: The Calibration Loop](#component-five-the-calibration-loop)
+9. [Component Five: The Calibration Loop and Qdrant-Backed Incident Memory](#component-five-the-calibration-loop-and-qdrant-backed-incident-memory)
 10. [Worked Example: Architectural Decision vs Mechanical Rename](#worked-example-architectural-decision-vs-mechanical-rename)
 11. [Related Directions](#related-directions)
 12. [Challenges and Open Problems](#challenges-and-open-problems)
@@ -67,7 +67,7 @@ The natural response — more review agents, more linters, an "adversarial revie
 
 If the gap cannot be closed by training a better verifier for maintainability, the loop needs to know when it has hit the gap and hand the decision to something that can evaluate it. That reframes the engineering problem: instead of one loop with one stop condition, build a small graph with a routing decision at its center.
 
-I implement that as a LangGraph `StateGraph` with five components: risk classification, bounded execution, escalation, checkpoint commit, and calibration. Task decomposition feeds the classifier; the classifier routes to bounded execution or escalation; both merge into a checkpoint; calibration feeds historical incident rates back into the classifier.
+I implement that as a LangGraph `StateGraph` with five components: risk classification, bounded execution, escalation, checkpoint commit, and calibration. Task decomposition feeds the classifier; the classifier routes to bounded execution or escalation; both merge into a checkpoint; calibration feeds historical incident rates back into the classifier via a Qdrant collection of embedded step outcomes, so `historical_rate` matches on *semantic* similarity rather than exact task-class string equality.
 
 ```
                     START → decompose → classify
@@ -539,7 +539,7 @@ class CheckpointCommitter:
 
 Rollback should be boring and total: hard reset to the previous checkpoint SHA, discard uncommitted agent edits, preserve the escalation label for calibration. LangGraph's checkpointer persists *graph state* for resume; git persists *repo state* for blast-radius control. Keep both.
 
-## Component Five: The Calibration Loop
+## Component Five: The Calibration Loop and Qdrant-Backed Incident Memory
 
 Every escalation outcome — approved, redirected, or rejected — and every autonomous failure caught by the retry cap becomes a labeled example. Mining these back into the risk classifier keeps the boundary between "loop it" and "escalate it" from being a fixed guess. A team that consistently sees database-migration steps rejected at escalation should see the classifier tighten for that class automatically.
 
