@@ -1,6 +1,6 @@
 ---
 title: "Waypoint, For Real: A Working Checkpoint-and-Resume Library for Agent Pipelines"
-date: 2026-07-17
+date: 2026-07-02
 description: "The implementation spec for Waypoint, tightened from architecture essay into precise module boundaries: a Workflow engine, a Qdrant-backed CheckpointStore with deterministic point IDs, a HashingEmbedder, and resume/diff/pause semantics an engineer could build from directly."
 tags: ["agents", "qdrant", "checkpointing", "durable-execution", "debugging", "workflows"]
 author: "Mihir Inamdar"

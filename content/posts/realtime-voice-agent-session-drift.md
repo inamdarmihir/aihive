@@ -1,6 +1,6 @@
 ---
 title: "Fixing Progressive Latency Drift in Long Realtime Voice Agent Sessions"
-date: 2026-07-30
+date: 2026-07-22
 description: "Voice agents built on OpenAI's Realtime API get slower the longer a session runs, and the standard fix — pruning or summarizing conversation history — doesn't reliably reset it. This post proposes a structurally different mitigation: a live, retrieval-seeded session profile backed by Qdrant, plus a per-turn latency probe that rotates sessions before drift becomes audible."
 tags: ["agents", "voice", "realtime-api", "latency", "reliability", "qdrant"]
 author: "Mihir Inamdar"

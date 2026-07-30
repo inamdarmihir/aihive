@@ -1,6 +1,6 @@
 ---
 title: "Scanning Shared Agent Skill Files for Injected Instructions Before You Fork Them"
-date: 2026-07-30
+date: 2026-07-14
 description: "Agent Skills — shareable markdown/YAML files that coding agents load and follow as instructions — get forked and translated across repositories with no review pipeline, yet unlike a .py file they are executed, not read. This post covers the injection half of that risk: a scanner that checks a candidate skill file against a corpus of known-suspicious instruction patterns, applies structural heuristics independent of any specific pattern, and tracks provenance across forks with a Qdrant-backed lineage registry."
 tags: ["agents", "security", "prompt-injection", "supply-chain", "qdrant"]
 author: "Mihir Inamdar"

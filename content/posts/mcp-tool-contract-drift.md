@@ -1,6 +1,6 @@
 ---
 title: "Detecting Tool-Contract Drift Across MCP Server Upgrades"
-date: 2026-07-30
+date: 2026-07-10
 description: "The MCP specification's 2026-07-28 revision lets clients cache tools/list results — a real efficiency win that also widens the window during which your agent can silently reason against a stale schema for a remote server you don't control. This post covers a consumer-side contract guard: daily schema snapshots, a deterministic structural diff, and a Qdrant-backed semantic-drift check that catches reworded tool descriptions a JSON-schema differ cannot."
 tags: ["agents", "mcp", "reliability", "observability", "qdrant"]
 author: "Mihir Inamdar"

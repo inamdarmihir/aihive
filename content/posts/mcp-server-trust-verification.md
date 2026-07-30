@@ -1,6 +1,6 @@
 ---
 title: "Before You Connect: Verifying MCP Server Identity Against Lookalikes"
-date: 2026-07-30
+date: 2026-07-16
 description: "MCP server discovery has moved from a colleague handing you a URL to searchable public directories that agents browse on their own. A server calling itself 'gdrive-search' and describing itself almost identically to the trusted 'gdrive-connector' should not get the same casual click-to-connect treatment. This post covers a Qdrant-backed trust-verification layer that runs before any OAuth flow starts."
 tags: ["agents", "mcp", "security", "supply-chain", "qdrant"]
 author: "Mihir Inamdar"

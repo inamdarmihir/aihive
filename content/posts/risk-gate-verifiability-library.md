@@ -1,6 +1,6 @@
 ---
 title: "risk-gate: A Working Risk Classifier for Agentic Software Factories"
-date: 2026-07-28
+date: 2026-07-08
 description: "This post is the design spec for risk-gate, a small library for agentic coding loops that scores every proposed step for verifiability before it runs, routes unverifiable or high-fan-out work to human escalation instead of grinding blind against a stop condition that can't see what matters, and calibrates its own thresholds against a Qdrant-backed history of past outcomes."
 tags: ["agents", "verifiability", "human-in-the-loop", "software-engineering", "qdrant"]
 author: "Mihir Inamdar"

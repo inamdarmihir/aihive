@@ -1,6 +1,6 @@
 ---
 title: "Taming Multi-Bot PR Review Fatigue: Deduplicating AI Code Review Comments"
-date: 2026-07-30
+date: 2026-07-24
 description: "Running four AI code review bots on the same pull request means the same real bug gets flagged three different ways in three different comments, while each bot's own distinct false positives pile on top. This post designs a review-consolidation gateway that buffers incoming bot comments, matches them by a combination of code-location proximity and semantic similarity — not text similarity alone — and collapses true duplicates deterministically, using Qdrant as the per-PR similarity index rather than another LLM call."
 tags: ["agents", "code-review", "github", "developer-productivity", "qdrant"]
 author: "Mihir Inamdar"
