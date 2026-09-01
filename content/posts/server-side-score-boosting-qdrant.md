@@ -1,6 +1,6 @@
 ---
 title: "Server-side score boosting: skip the re-ranking microservice"
-date: 2026-08-26
+date: 2026-08-21
 description: "A lot of production search stacks run a separate re-ranking service for business-rule boosting Qdrant already supports natively as a formula query. Recency decay, geo boost, and inventory boost, expressed server-side, without the network hop."
 tags: ["qdrant", "reranking", "search-relevance", "vector-search"]
 author: "Mihir Inamdar"

@@ -1,6 +1,6 @@
 ---
 title: "Static embeddings lose to BM25. Here's the middle ground Qdrant didn't test."
-date: 2026-08-22
+date: 2026-08-26
 description: "A Qdrant DevRel benchmark showed static, no-transformer embeddings losing to BM25 on quality despite a 30x speed edge. It never tested ternary quantization, a BitNet-style approach that keeps the transformer and just quantizes its weights. We built and measured that middle point on real CodeSearchNet data."
 tags: ["qdrant", "embeddings", "quantization", "vector-search"]
 author: "Mihir Inamdar"

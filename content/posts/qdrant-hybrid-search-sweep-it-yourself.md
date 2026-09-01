@@ -1,6 +1,6 @@
 ---
 title: "Qdrant's hybrid search docs stop at \"sweep it yourself\""
-date: 2026-08-21
+date: 2026-08-16
 description: "Qdrant's own tuning guide hands you the RRF-vs-DBSF sweep and admits there's no script to run it for you. A second set of failure modes, a missing IDF modifier, a wrong avg_len, fusion placed wrong relative to sharding, doesn't throw an error either. A preflight check for the checkable subset of it."
 tags: ["qdrant", "hybrid-search", "rrf", "vector-search"]
 author: "Mihir Inamdar"

@@ -1,6 +1,6 @@
 ---
 title: "Migrating to Qdrant without losing recall"
-date: 2026-08-11
+date: 2026-08-06
 description: "Migration guides check whether the vectors moved. They don't check whether the destination still finds the same things the source did. A recall-parity check against a sample of real production queries closes that gap before cutover, not after."
 tags: ["qdrant", "pgvector", "migration", "vector-search"]
 author: "Mihir Inamdar"

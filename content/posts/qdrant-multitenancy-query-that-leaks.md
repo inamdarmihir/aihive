@@ -1,6 +1,6 @@
 ---
 title: "Multi-tenant Qdrant: the query that leaks"
-date: 2026-08-06
+date: 2026-08-01
 description: "Payload partitioning, collection-per-tenant, and 1.19's tiered multitenancy all trade off differently, but the isolation boundary itself is a filter nobody enforces at the code level. A query built without it doesn't error, it just searches every tenant sharing the collection."
 tags: ["qdrant", "multi-tenancy", "vector-search", "reliability"]
 author: "Mihir Inamdar"

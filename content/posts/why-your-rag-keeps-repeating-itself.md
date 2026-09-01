@@ -1,6 +1,6 @@
 ---
 title: "Why your RAG keeps repeating itself"
-date: 2026-08-16
+date: 2026-08-11
 description: "Near-duplicate chunks crowd the top of a similarity search ranking because nothing in plain top-k retrieval penalizes redundancy. Maximal Marginal Relevance fixes it, but proving it helped needs a metric built for how an LLM actually consumes retrieved passages, not nDCG."
 tags: ["qdrant", "rag", "retrieval", "evaluation"]
 author: "Mihir Inamdar"
