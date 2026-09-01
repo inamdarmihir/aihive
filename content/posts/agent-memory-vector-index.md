@@ -1,6 +1,6 @@
 ---
 title: "What agent memory actually does to a vector index"
-date: 2026-09-01
+date: 2026-08-27
 description: "AI agents write to memory constantly and read from it rarely, the opposite of a batch-loaded RAG corpus. We measured what that write pattern does to a real Qdrant collection's recall, latency, and footprint against LoCoMo's real long-term dialogue data. The honest answer, at this scale: nothing."
 tags: ["qdrant", "agent-memory", "vector-search", "benchmarking"]
 author: "Mihir Inamdar"
