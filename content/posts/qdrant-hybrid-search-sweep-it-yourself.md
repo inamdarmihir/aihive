@@ -105,4 +105,4 @@ def preflight_hybrid_search(
 
 Two of the four get a real programmatic answer: the IDF modifier, because it's config Qdrant actually stores and `get_collection` returns; the fusion nesting, because it's structure in a Python object you already built and can walk. The other two, `avg_len` and labeled-set size, aren't things the Qdrant API was ever going to expose, they live outside the database entirely, in the encoder config and the eval harness. A preflight check that claimed otherwise would be exactly the kind of silent failure this article is about.
 
-Sources: [Qdrant, How to Tune Hybrid Search](https://qdrant.tech/articles/how-to-tune-hybrid-search/); Andre Zayarni (Qdrant CEO) and Dylan Couzon (Qdrant DevRel), internal posts on silent-failure settings in hybrid search configuration.
+Sources: [Qdrant, How to Tune Hybrid Search](https://qdrant.tech/articles/how-to-tune-hybrid-search/); Qdrant team posts on silent-failure settings in hybrid search configuration.
