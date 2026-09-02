@@ -7,17 +7,59 @@ author: "Mihir Inamdar"
 showToc: false
 ---
 
-Qdrant's own article on tuning hybrid search, [How to Tune Hybrid Search in Qdrant](https://qdrant.tech/articles/how-to-tune-hybrid-search/), is unusually direct about what it doesn't give you. It explains how to sweep RRF against DBSF, how to sweep the `k` constant, and how to sweep fusion weights once `k` is settled. It provides the Python snippets to do each sweep by hand. What it doesn't provide is a script that runs the sweep for you. That's a gap the vendor's own documentation states plainly, not one a third party is guessing at.
+I went looking for a script to sweep RRF against DBSF in Qdrant and found
+something more useful than a script: Qdrant's own article on the topic,
+[How to Tune Hybrid Search in Qdrant](https://qdrant.tech/articles/how-to-tune-hybrid-search/),
+just telling you straight up that no such script exists. It walks through
+how to sweep RRF against DBSF, how to sweep the `k` constant, and how to
+sweep fusion weights once `k` is settled, Python snippets included for each
+step. What it doesn't give you is something that runs the sweep for you.
+That's the vendor's own documentation saying so, not me guessing.
 
-The findings are worth knowing on their own. Across five public benchmark datasets, hybrid retrieval beat both pure dense and pure sparse search on four of them, by 2 to 4 percent on nDCG@10. DBSF beat default RRF on three of the five. And `k` behaves differently depending on how many relevant documents a typical query actually has: around one relevant document per query favored `k` at 2 or 5, dozens or hundreds favored `k` at 20 or 61. None of that is intuitive, and none of it transfers to a different dataset without checking.
+The findings underneath are worth knowing regardless. Across five public
+benchmark datasets, hybrid retrieval beat both pure dense and pure sparse
+search on four of them, by 2 to 4 percent on nDCG@10. DBSF beat default RRF
+on three of the five. And `k` behaves differently depending on how many
+relevant documents a typical query actually has: around one relevant
+document per query favored `k` at 2 or 5, dozens or hundreds favored `k` at
+20 or 61. None of that is intuitive, and none of it transfers to a
+different dataset without checking your own.
 
-There's a second article, from Qdrant's own team, about a shorter and meaner list: settings that fail silently. A sparse vector missing its IDF modifier treats a rare, specific term the same as a common one. Nothing errors. BM25's `avg_len` defaults to 256 in Qdrant; across the same five datasets, the actual correct value ranged from 35.3 to 151.4, meaning the default overestimated typical document length by 15 to 43 percent, every single time. That doesn't throw an error either. It just quietly changes every score.
+There's a second Qdrant article, from the same team, about a shorter and
+meaner list: settings that fail silently. A sparse vector missing its IDF
+modifier treats a rare, specific term the same as a common one, and nothing
+errors. BM25's `avg_len` defaults to 256 in Qdrant; across the same five
+datasets, the actual correct value ranged from 35.3 to 151.4, meaning the
+default overestimated typical document length by 15 to 43 percent, every
+single time. That doesn't throw an error either. It just quietly changes
+every score you get back.
 
-The sharding case is the easiest to miss. Fusion placed at the query root runs once, across the full result set, after all shards return candidates, which is what most people assume happens. Fusion nested inside a prefetch instead runs once per shard, combining only that shard's local candidates. The ranking that comes out depends on shard count, and nothing in the response says which one you got.
+Going through both articles side by side took longer than I expected,
+mostly because the tuning guide and the silent-failures piece are solving
+adjacent but different problems, one is "which fusion setting wins," the
+other is "which settings quietly corrupt the comparison you're making
+between fusion settings." You need both pieces read together before a
+sweep result means anything, and I don't think that's obvious from either
+article on its own.
 
-None of this throws an error. It shows up as an A/B test result that looks real and isn't. With 25 labeled queries, the 95 percent confidence interval on a fusion-tuning gain was wider than most of the gains being measured, which means a lot of "hybrid search improved things by 2 percent" claims are statistically unresolved, not confirmed.
+The sharding case is the one I'd most easily have missed. Fusion placed at
+the query root runs once, across the full result set, after all shards
+return candidates, which is what most people assume happens. Fusion nested
+inside a prefetch instead runs once per shard, combining only that shard's
+local candidates. Which ranking you get depends on shard count, and nothing
+in the response tells you which one you got.
 
-Qdrant has published the method and the caveats clearly. What's missing is a tool that checks a live collection against this exact list before anyone trusts what a fusion sweep hands back. Here's a start, honest about which of the four it can actually see:
+None of this throws an error. It shows up later as an A/B test result that
+looks real and isn't. With 25 labeled queries, the 95 percent confidence
+interval on a fusion-tuning gain was wider than most of the gains being
+measured, meaning a lot of "hybrid search improved things by 2 percent"
+claims out there are statistically unresolved, not confirmed.
+
+Qdrant published the method and the caveats clearly. What's missing is
+something that checks a live collection against this exact list before
+anyone trusts what a fusion sweep hands back. So here's a start, and I want
+to be upfront about which of the four it can actually see and which it
+can't:
 
 ```python
 from qdrant_client import QdrantClient, models
@@ -103,6 +145,21 @@ def preflight_hybrid_search(
     return warnings
 ```
 
-Two of the four get a real programmatic answer: the IDF modifier, because it's config Qdrant actually stores and `get_collection` returns; the fusion nesting, because it's structure in a Python object you already built and can walk. The other two, `avg_len` and labeled-set size, aren't things the Qdrant API was ever going to expose, they live outside the database entirely, in the encoder config and the eval harness. A preflight check that claimed otherwise would be exactly the kind of silent failure this article is about.
+Two of the four get a real programmatic answer: the IDF modifier, because
+it's config Qdrant actually stores and `get_collection` returns; the
+fusion nesting, because it's structure in a Python object you already
+built and can walk. The other two, `avg_len` and labeled-set size, were
+never going to be things the Qdrant API exposes, they live outside the
+database entirely, in the encoder config and your eval harness. A
+preflight check that pretended otherwise would just be one more silent
+failure in a post about silent failures.
+
+In practice I'd run `preflight_hybrid_search` as a pre-merge check any
+time someone touches fusion config, not just once before the initial
+sweep. Config drifts, someone changes the sparse encoder's defaults months
+later, and the IDF modifier check especially is cheap enough to run on
+every deploy. The other three warnings need a human to supply numbers,
+which means they're a checklist item for whoever's running the sweep, not
+something CI can catch on its own.
 
 Sources: [Qdrant, How to Tune Hybrid Search](https://qdrant.tech/articles/how-to-tune-hybrid-search/); Qdrant team posts on silent-failure settings in hybrid search configuration.

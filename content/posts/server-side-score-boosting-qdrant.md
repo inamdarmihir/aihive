@@ -7,11 +7,23 @@ author: "Mihir Inamdar"
 showToc: false
 ---
 
-A lot of production search stacks have a second service whose entire job is: take the results the vector database already ranked, and re-rank them again based on business logic. Recency, distance from the user, whether the item is in stock. That's a network hop, a deploy, and an on-call rotation for logic that could run inside the query that already touched the data once.
+A lot of production search stacks run a second service whose entire job is
+taking the results the vector database already ranked and re-ranking them
+again based on business logic: recency, distance from the user, whether the
+item is in stock. That's a network hop, a deploy, and an on-call rotation
+for logic that could just run inside the query that already touched the
+data once.
 
-Qdrant supports formula queries: score boosting expressed as an arithmetic combination of the vector similarity score and payload fields, evaluated server-side as part of the search itself. Recency decay, geo boost, inventory boost, and arbitrary combinations of business rules are all expressible this way, without shipping search results out to a separate process to get re-scored.
+Qdrant supports formula queries, score boosting expressed as an arithmetic
+combination of the vector similarity score and payload fields, evaluated
+server-side as part of the search itself. Recency decay, geo boost,
+inventory boost, and arbitrary combinations of business rules are all
+expressible this way, no shipping results out to a separate process to get
+re-scored.
 
-Here's recency decay specifically, boosting the vector score with an exponential falloff over a `published_at` payload field, using the actual `FormulaQuery` syntax from [Qdrant's hybrid queries](https://qdrant.tech/documentation/concepts/hybrid-queries/) and [search relevance](https://qdrant.tech/documentation/search/search-relevance/) docs:
+Here's recency decay specifically, boosting the vector score with an
+exponential falloff over a `published_at` payload field, using the actual
+`FormulaQuery` syntax from [Qdrant's hybrid queries](https://qdrant.tech/documentation/concepts/hybrid-queries/) and [search relevance](https://qdrant.tech/documentation/search/search-relevance/) docs:
 
 ```python
 from datetime import datetime, timezone
@@ -51,12 +63,63 @@ results = client.query_points(
 )
 ```
 
-`"$score"` is the literal string Qdrant's formula language uses to reference the prefetch's own similarity score, it's not a placeholder to swap out. `scale` and `midpoint` set the decay curve: at `|x - target| == scale`, the decay term equals `midpoint`, here 0.5 at 30 days out. `published_at` has to actually be stored as an RFC 3339 datetime string in the payload for `DatetimeKeyExpression` to read it. Swap `ExpDecayExpression` for `GaussDecayExpression` or `LinDecayExpression` for a softer or harder falloff shape, same `DecayParamsExpression` underneath.
+`"$score"` is the literal string Qdrant's formula language uses to
+reference the prefetch's own similarity score, not a placeholder to swap
+out. `scale` and `midpoint` are what actually shape the decay curve: at
+`|x - target| == scale`, the decay term equals `midpoint`, here 0.5 at 30
+days out, so a 30-day-old article's recency contribution is worth half of a
+brand-new one's. `published_at` has to actually be stored as an RFC 3339
+datetime string in the payload for `DatetimeKeyExpression` to read it. Swap
+`ExpDecayExpression` for `GaussDecayExpression` or `LinDecayExpression` for
+a softer or harder falloff shape, same `DecayParamsExpression` underneath.
 
-This isn't a niche feature. Qdrant's own internal content brief flags it directly: "almost no community content exists yet despite being one of the most commercially useful features." That's a specific, checkable claim, not a vague one, and it lines up with what shows up searching for real-world formula query examples: a lot of general reranking tutorials, very little on Qdrant's server-side formula syntax specifically.
+Wiring this into an existing service is mostly a matter of moving logic
+that already exists somewhere in your reranking service into the query
+itself. The `prefetch` limit matters here as much as the formula does:
+`limit=50` inside prefetch versus `limit=10` on the outer query means the
+formula gets 50 real candidates to re-score before trimming down to the
+10 you actually return, so the boost has room to actually change the
+ranking instead of just re-sorting a set that's already been cut too
+short.
 
-The reason this gap probably exists isn't that formula queries are hard to use. It's that the pattern of "vector search, then a separate reranking pass" is the default mental model most people bring in from other systems, where the vector database genuinely doesn't support scoring beyond similarity. Qdrant does, and that changes the architecture question from "how do we build a fast reranking service" to "do we need a reranking service at all, for the cases formula queries already cover."
+This isn't a niche feature, and it's underused for what it does: almost no
+community content exists on it despite it being one of the more
+commercially useful things Qdrant ships. That tracks with what shows up
+when you actually go looking for formula query examples in the wild, a lot
+of general reranking tutorials, very little on Qdrant's server-side formula
+syntax specifically.
 
-Not every case. A learned reranker, a cross-encoder scoring query-document pairs directly, is still doing something formula queries can't: judging semantic relevance beyond vector similarity. The comparison that actually matters is narrower than "formula queries versus reranking" in general. It's formula queries versus the specific, common case of business-rule boosting: recency, geography, inventory, and similar deterministic adjustments that don't require a model call to compute, just a payload field and an arithmetic expression.
+I don't think the gap is because formula queries are hard to use. I think
+it's that "vector search, then a separate reranking pass" is the default
+mental model most people carry over from other systems, where the vector
+database genuinely can't score beyond similarity. Qdrant can, and that
+changes the question from "how do we build a fast reranking service" to
+"do we need a reranking service at all, for the cases formula queries
+already cover."
 
-For that narrower case, the tradeoff is concrete: one query instead of a query plus a network round trip to a separate service, one system to operate instead of two, and boosting logic that lives next to the data it depends on instead of in application code that has to fetch that data separately to apply the same rule. What this piece doesn't have yet is a real latency comparison, formula query versus external reranker, run on the same dataset. Qdrant's own docs cover the syntax. Nobody seems to have published the number that tells you whether "skip the microservice" is worth doing for your actual query volume, and that's the number a genuinely useful follow-up would need to produce, not assume.
+Not every case, to be clear. A learned reranker, a cross-encoder scoring
+query-document pairs directly, is still doing something formula queries
+can't: judging semantic relevance beyond vector similarity. The comparison
+that actually matters is narrower than "formula queries versus reranking"
+in general. It's formula queries versus the specific, common case of
+business-rule boosting: recency, geography, inventory, and similar
+deterministic adjustments that don't need a model call, just a payload
+field and an arithmetic expression.
+
+For that narrower case, the tradeoff is concrete: one query instead of a
+query plus a round trip to a separate service, one system to operate
+instead of two, boosting logic that lives next to the data it depends on
+instead of application code that has to fetch that data separately just to
+apply the same rule. What I don't have yet is a real latency comparison,
+formula query versus external reranker, run on the same dataset. Qdrant's
+docs cover the syntax well. Nobody seems to have published the number that
+tells you whether skipping the microservice is worth it at your actual
+query volume, and that's the number I'd want a real follow-up to produce.
+
+The case where I'd reach for this first is a content feed with a recency
+requirement, articles, listings, anything where "newer, all else equal"
+is a real ranking rule. Instead of a reranking pass that pulls
+`published_at` back out of a database after the vector search already
+ran, the formula reads the payload field that's already sitting on the
+point. One fewer round trip, one fewer place for the recency logic and the
+similarity logic to silently drift out of sync with each other.
