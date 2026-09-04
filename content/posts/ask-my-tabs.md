@@ -1,6 +1,6 @@
 ---
 title: "Ask My Tabs: A Local Agentic RAG Layer Over Your Open Browser Tabs"
-date: 2026-09-04
+date: 2026-08-14
 description: "A Chrome extension that answers questions across a working set of open tabs, with retrieval and generation both running in-browser via WebGPU. The interesting part isn't the agent loop, it's a retrieval bug that only showed up once the embedding model got quantized -- and never threw an error."
 tags: ["chrome-extension", "rag", "agents", "webgpu", "quantization", "browser-ai"]
 author: "Mihir Inamdar"
